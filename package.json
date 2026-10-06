@@ -1,0 +1,30 @@
+{
+  "name": "rescueeye",
+  "version": "1.0.0",
+  "description": "AI-Powered Search & Rescue UAV Platform",
+  "main": "backend/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/backend/main.js",
+    "dev": "ts-node backend/main.ts",
+    "test": "jest --testPathPattern=tests",
+    "test:coverage": "jest --coverage"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.18.2",
+    "helmet": "^7.1.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.10",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.4.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
