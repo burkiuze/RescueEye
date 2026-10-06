@@ -35,11 +35,23 @@ Read this section before trusting any claim further down.
 | **Real camera / video pipeline** | **Not implemented.** Frame buffer and interfaces only. |
 | **Real ONNX inference** | **Not implemented.** Pluggable runtime hook, needs a model. |
 | **Search-area polygon planning** | **Not implemented.** |
+| **Geofence enforcement** | **Advisory only.** Warns; does not command a return. |
+| **Vision + mission services at runtime** | **Not wired.** `vision/` and `backend/mission_service.ts` are tested but not imported by the server. |
+| **Audit persistence** | **In-memory only.** Capped at 10 000 entries, lost on restart. |
 
 Everything marked *not implemented* is a genuine gap, not a configuration
 issue. `DRONE_MODE` refuses anything other than `simulator` rather than
-pretending to fly. See [docs/architecture.md](docs/architecture.md) for exactly
-what each missing piece needs.
+pretending to fly. See [docs/architecture.md](docs/architecture.md) §11 for the
+full component-by-component status table.
+
+### Known safety limitations
+
+- **Geofence is advisory.** It warns; it will not stop the aircraft leaving the area.
+- **Wind is a proxy.** The monitor compares ground speed against a wind threshold,
+  so a strong wind while hovering reads as zero.
+- **Duplicated thresholds.** `telemetry_service.ts` and `safety_service.ts` each define
+  their own battery and satellite limits; they can drift.
+- **RTH never terminates** in the simulator, and landing has no ground contact.
 
 ---
 
@@ -190,7 +202,7 @@ npm run build
 npm test
 ```
 
-119 tests across three suites:
+123 tests across three suites:
 
 - **unit** — roles and capabilities, auth, overrides and expiry, audit,
   safety transitions, mission state machine, persistence and crash recovery,
@@ -202,35 +214,121 @@ npm test
 - **entrypoint** — the startup bootstrap wiring, which is where the tokens and
   the server's `AuthService` must be the same object.
 
+Documentation diagrams are checked too:
+
+```bash
+node scripts/check-mermaid.js
+```
+
+Parses every Mermaid block in `docs/architecture.md` and reports undeclared
+nodes and unbalanced braces, so a diagram cannot silently rot into something
+that looks authoritative and renders as an error.
+
+---
+
+## Architecture
+
+The platform is documented as seven cooperating systems rather than a dashboard
+with a data feed:
+
+| System | Responsibility |
+|--------|----------------|
+| **Rescue UAV / onboard** | Flight core, navigation and attitude state, sensor fusion, telemetry publication |
+| **Vision & AI perception** | Frame pipeline, ONNX detection, confidence filtering, NMS, provenance gating |
+| **Mission intelligence** | Search area, coverage planning, waypoints, lifecycle state machine |
+| **Safety / failsafe** | Threshold evaluation, transition detection, arbitration, failsafe dispatch |
+| **Ground control centre** | Sign-in, live map, telemetry, detections, timeline, role-gated controls |
+| **Audit / flight record** | Mission events, safety events, security audit, append-only persistence |
+| **Digital twin** | Simulator satisfying the same `DroneAdapter` contract as a real aircraft |
+
+### Master diagram
+
+The full system architecture — 194 components across 14 subgraphs — is in
+[`docs/architecture.md`](docs/architecture.md), together with:
+
+- search and rescue mission flow
+- vision and detection architecture
+- safety and failsafe architecture
+- human safety authority (override path)
+- command and authorisation pipeline
+- telemetry and communication architecture
+- ground control architecture
+- simulator / real UAV abstraction
+- event, audit and persistence architecture
+- an implementation-status table mapping every component to its source file
+
+### Two things to know before reading the architecture
+
+**`vision/` and `backend/mission_service.ts` are implemented and unit-tested but
+not imported by the server or the entry point.** The running console uses the
+server's own mission state machine and its own detection recorder. They are
+marked `[UNWIRED]` throughout the architecture document and are not drawn as
+active in the master diagram.
+
+**`mavlink_adapter.ts` and `mavsdk_adapter.ts` satisfy the `DroneAdapter`
+interface, but their method bodies are placeholders.** Neither opens a socket.
+They would not work against a real aircraft.
+
+### Command path
+
+No browser-to-aircraft path exists that skips the backend:
+
+```
+console → REST → authenticate → authorise → validate → safety arbitration
+        → command gateway → DroneAdapter → aircraft
+```
+
+The WebSocket is a **read-only push channel**. Aircraft-changing commands are
+refused over it (`unknown_message_type`) so that every state change is
+authorised and audited per request.
+
+### The abstraction that matters
+
+```
+REAL UAV ────┐
+             ├──▶ DroneAdapter ──▶ telemetry · missions · safety · UI
+SIMULATOR ───┘
+```
+
+Everything above the interface is identical whether the aircraft is real or
+simulated. `DRONE_MODE` refuses any value other than `simulator` rather than
+pretending to fly.
+
 ---
 
 ## Repository layout
 
 ```
 backend/
-  main.ts            entry point: config, seeding, listener
-  server.ts          HTTP + WS, routing, auth, safety arbitration
-  auth_service.ts    tokens, capabilities, audit, override ledger
-  persistence.ts     append-only JSONL stores
-  safety_service.ts  threshold evaluation and failsafe actions
+  main.ts               entry point: config, operator seeding, listener
+  server.ts             HTTP + WS, routing, auth, safety arbitration, stores
+  auth_service.ts       tokens, capabilities, audit log, override ledger
+  persistence.ts        append-only JSONL stores with crash recovery
+  safety_service.ts     threshold evaluation, transition detection, failsafes
   telemetry_service.ts  telemetry state, alerting, timeouts
-  event_service.ts   structured, filterable event log
-  mission_service.ts  mission state machine and stores
+  event_service.ts      structured, filterable event log
+  mission_service.ts    mission state machine + stores  [UNWIRED]
 drone/
-  adapter.ts         DroneAdapter contract and re-exports
-  mavlink_adapter.ts   scaffold
-  mavsdk_adapter.ts    scaffold
-  connection_manager.ts
+  adapter.ts            DroneAdapter contract and re-exports
+  mavlink_adapter.ts    MAVLink scaffold                [PLANNED]
+  mavsdk_adapter.ts     MAVSDK scaffold                 [PLANNED]
+  connection_manager.ts reconnect policy
 simulator/
-  simulator_adapter.ts
+  simulator_adapter.ts  hardware-free aircraft          [IMPLEMENTED]
 vision/
-  detection.ts       DetectionModel, ONNX hook, SyntheticModel, NMS
-  camera_pipeline.ts FrameBuffer and camera interfaces
+  detection.ts          DetectionModel, ONNX hook, SyntheticModel, NMS  [UNWIRED]
+  camera_pipeline.ts    FrameBuffer + camera interfaces [UNWIRED]
 shared/
-  models.ts          types, roles, capabilities
+  models.ts             types, roles, capabilities, provenance
 frontend/
-  index.html  app.js  styles.css
+  index.html app.js styles.css    console, no build step
 tests/
+  unit.test.ts          3 suites: unit, integration, entry point
+  integration.test.ts
+  entrypoint.test.ts
+scripts/
+  build.js              TypeScript build
+  check-mermaid.js      validates every diagram in docs/architecture.md
 ```
 
 ## Documentation

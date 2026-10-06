@@ -292,10 +292,54 @@ describe("SafetyService", () => {
     expect(events[0].action.type).toBe("RTH_REQUESTED");
   });
 
-  test("lost connection is critical", () => {
+  test("lost connection is critical and produces a dispatchable action", () => {
     const events = svc.evaluate(telemetry({ connectionState: "LOST" }));
     expect(events[0].state).toBe("CONNECTION_LOST");
     expect(events[0].action.priority).toBeLessThanOrEqual(2);
+    // The action type must be one the server's applyFailsafe can actually
+    // dispatch. It was "CRITICAL" — a severity word, not an action — so the
+    // abort branch never ran and a lost link left the mission flying
+    // unattended. Asserting only on priority would not have caught that.
+    expect(["MISSION_ABORT", "RTH_REQUESTED", "EMERGENCY_LANDING"]).toContain(
+      events[0].action.type,
+    );
+  });
+
+  test("stale telemetry raises TELEMETRY_TIMEOUT", () => {
+    // telemetryTimeoutMs was configured but never read, so a stream that
+    // simply stopped produced no safety event whatsoever.
+    const strict = new SafetyService({ telemetryTimeoutMs: 1000 });
+    const events = strict.evaluate(telemetry({ timestamp: Date.now() - 30_000 }));
+    expect(events.length).toBeGreaterThan(0);
+    expect(events[0].state).toBe("TELEMETRY_TIMEOUT");
+    expect(["MISSION_ABORT", "RTH_REQUESTED"]).toContain(events[0].action.type);
+  });
+
+  test("fresh telemetry does not trip the timeout", () => {
+    const strict = new SafetyService({ telemetryTimeoutMs: 1000 });
+    expect(strict.evaluate(telemetry())).toHaveLength(0);
+  });
+
+  test("a genuine transition is never swallowed by the repeat cooldown", () => {
+    // Cooldown suppresses a *held* condition re-firing each frame. It must not
+    // suppress the moment the state actually changes, or the operator sees the
+    // safety indicator move with no event explaining why.
+    const seq = new SafetyService();
+    seq.evaluate(telemetry({ batteryPercentage: 3 }));   // emits CRITICAL_BATTERY
+    seq.evaluate(telemetry({ batteryPercentage: 90 }));  // clears to NORMAL
+    const events = seq.evaluate(telemetry({ gpsFix: false, satelliteCount: 2 }));
+    expect(events.some((e) => e.state === "GPS_DEGRADED")).toBe(true);
+  });
+
+  test("a held condition does not re-emit on every frame", () => {
+    // The other half of the rule: without cooldown, a 3% pack at 10 Hz floods
+    // the event log (4922 events in 29 seconds) and buries the screen.
+    const held = new SafetyService();
+    const first = held.evaluate(telemetry({ batteryPercentage: 3 }));
+    expect(first.length).toBeGreaterThan(0);
+    for (let i = 0; i < 50; i++) {
+      expect(held.evaluate(telemetry({ batteryPercentage: 3 }))).toHaveLength(0);
+    }
   });
 
   test("degraded GPS is flagged", () => {

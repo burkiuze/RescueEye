@@ -82,18 +82,37 @@ export class SafetyService {
     const newEvents: SafetyEvent[] = [];
     const now = Date.now();
 
-    // Repeat suppression: the same condition re-firing only after a cooldown.
-    // Chosen to be comfortably longer than a telemetry drop-out so a brief
-    // sensor glitch does not re-announce, but short enough that a genuinely
-    // new occurrence is still reported.
+    // Repeat suppression for a *held* condition. A genuine transition always
+    // emits, even inside the cooldown window: the cooldown exists to stop a
+    // condition that is still true from re-firing every frame, and must not
+    // swallow the moment the state actually changes.
     const repeatCooldownMs = 30_000;
-
     const shouldEmit = (state: SafetyState): boolean => {
+      const isTransition = this.currentState !== state;
       const last = this._lastEmitted.get(state) ?? 0;
-      if (now - last < repeatCooldownMs) return false;
+      if (!isTransition && now - last < repeatCooldownMs) return false;
       this._lastEmitted.set(state, now);
       return true;
     };
+
+    // A frame that arrives late is itself evidence of a bad link. Without this
+    // check the whole timeout path was dead: telemetryTimeoutMs was configured
+    // but never read, so TELEMETRY_TIMEOUT could never fire and a stream that
+    // simply stopped was indistinguishable from a perfectly healthy aircraft.
+    const frameAgeMs = now - telemetry.timestamp;
+    if (frameAgeMs > this.thresholds.telemetryTimeoutMs) {
+      if (shouldEmit("TELEMETRY_TIMEOUT")) {
+        const evt = this._createEvent("TELEMETRY_TIMEOUT", telemetry, {
+          type: "MISSION_ABORT",
+          description: `No telemetry for ${Math.round(frameAgeMs / 1000)}s — treating link as lost`,
+          priority: 1,
+          requiresOperatorConfirmation: false,
+        });
+        newEvents.push(evt);
+      }
+      this._transitionTo("TELEMETRY_TIMEOUT");
+      return newEvents;
+    }
 
     // Check battery
     if (telemetry.batteryPercentage <= this.thresholds.criticalBatteryPercent) {
@@ -157,7 +176,11 @@ export class SafetyService {
           "CONNECTION_LOST",
           telemetry,
           {
-            type: "CRITICAL",
+            // Was "CRITICAL", which is a severity word rather than an action,
+            // so applyFailsafe never matched it and a lost link left the
+            // mission running with nobody watching. Losing the link must stop
+            // the sortie.
+            type: "MISSION_ABORT",
             description: "Telemetry connection lost — failsafe triggered",
             priority: 1,
             requiresOperatorConfirmation: false,
