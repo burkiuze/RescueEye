@@ -3,6 +3,9 @@
 
 import type { Telemetry, ConnectionState, Severity, Alert } from "../shared/models";
 
+/** Minimum gap between two alerts of the same type. */
+const ALERT_REPEAT_COOLDOWN_MS = 30_000;
+
 export interface TelemetryListener {
   (telemetry: Telemetry): void;
 }
@@ -16,6 +19,7 @@ export class TelemetryService {
   private listeners: TelemetryListener[] = [];
   private alertListeners: AlertListener[] = [];
   private alerts: Alert[] = [];
+  private _lastAlertAt = new Map<string, number>();
   private _lastUpdateAt: number = 0;
   private _timeoutMs: number = 3000;
   private _healthCheckInterval: number | NodeJS.Timeout | null = null;
@@ -168,6 +172,16 @@ export class TelemetryService {
   }
 
   private _emitAlert(alert: Alert): void {
+    // Suppress repeats of a condition that is still true. Without this, a pack
+    // sitting at 3% would emit an alert on every one of ~10 frames per second
+    // and bury every other message the operator needs to read.
+    const now = Date.now();
+    const last = this._lastAlertAt.get(alert.type) ?? 0;
+    if (now - last < ALERT_REPEAT_COOLDOWN_MS) {
+      return;
+    }
+    this._lastAlertAt.set(alert.type, now);
+
     this.alerts.push(alert);
     // Keep only last 100 alerts
     if (this.alerts.length > 100) {

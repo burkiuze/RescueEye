@@ -16,7 +16,7 @@ export class MavlinkDroneAdapter implements DroneAdapter {
   private _telemetry: Telemetry | null = null;
   private _telemetryCallbacks: Array<(t: Telemetry) => void> = [];
   private _connectionCallbacks: Array<(s: ConnectionState) => void> = [];
-  private _intervalIds: number[] = [];
+  private _intervalIds: Array<NodeJS.Timeout> = [];
   private _parser?: TelemetryParser;
   private _protocol?: AutopilotProtocol;
 
@@ -168,7 +168,7 @@ export class MavlinkDroneAdapter implements DroneAdapter {
   }
 
   private _stopAll(): void {
-    this._intervalIds.forEach((id) => clearInterval(id));
+    for (const id of this._intervalIds) clearInterval(id);
     this._intervalIds = [];
   }
 }

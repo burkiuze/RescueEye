@@ -35,12 +35,16 @@ export class SimulatorDroneAdapter implements DroneAdapter {
   private _currentBattery: number;
   private _currentSpeed: number;
   private _currentVSpeed: number;
+  /** Commanded values; actual values settle toward these rather than drifting. */
+  private _commandedSpeed: number;
+  private _commandedVspeed: number = 0;
   private _flightDuration: number = 0;
   private _distanceFromHome: number = 0;
   private _waypointIndex: number = 0;
   private _waypoints: Array<{ lat: number; lon: number; alt: number }> = [];
   private _isPaused: boolean = false;
   private _isAborted: boolean = false;
+  private _flightMode: FlightMode = "AUTO";
 
   constructor(droneId: string, config?: Partial<SimulatorConfig>) {
     this.droneId = droneId;
@@ -51,6 +55,7 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this._currentHeading = this.config.headingDegrees;
     this._currentBattery = this.config.batteryCapacityPercent;
     this._currentSpeed = this.config.speedMps;
+    this._commandedSpeed = this.config.speedMps;
     this._currentVSpeed = 0;
   }
 
@@ -63,6 +68,10 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     await new Promise((resolve) => setTimeout(resolve, 100));
     this._setState("CONNECTED");
     this._simStartTime = Date.now();
+    // Publish a frame immediately so a client that connects right away has
+    // position data before the first 100 ms tick lands.
+    const initial = this._buildTelemetry();
+    this._telemetry = initial;
     this._startSimulation();
   }
 
@@ -81,22 +90,30 @@ export class SimulatorDroneAdapter implements DroneAdapter {
 
   async setFlightMode(mode: FlightMode): Promise<void> {
     if (!this.isConnected()) throw new Error("Simulator not connected");
-    // Flight mode changes are simulated; telemetry will reflect the new mode.
+    this._flightMode = mode;
   }
 
   async requestRTH(): Promise<void> {
     if (!this.isConnected()) throw new Error("Simulator not connected");
+    // Steer back toward home instead of merely flagging an intent.
     this._waypoints = [];
     this._waypointIndex = 0;
-    // Simulate return-to-home movement
-    this._currentVSpeed = 1; // climbing slightly during RTH
+    this._commandedSpeed = Math.max(this.config.speedMps, 5);
+    const toHome = this._bearingTo(
+      this.config.startLatitude,
+      this.config.startLongitude,
+    );
+    this._currentHeading = toHome;
+    this._commandedVspeed = 1.5; // gentle climb while returning
+    this._flightMode = "RTL";
   }
 
   async requestLand(): Promise<void> {
     if (!this.isConnected()) throw new Error("Simulator not connected");
     this._waypoints = [];
     this._waypointIndex = 0;
-    this._currentVSpeed = -2; // descending
+    this._commandedVspeed = -1.5; // descend
+    this._flightMode = "LAND";
   }
 
   async pauseMission(): Promise<void> {
@@ -135,7 +152,7 @@ export class SimulatorDroneAdapter implements DroneAdapter {
   }
 
   setSpeed(mps: number): void {
-    this._currentSpeed = mps;
+    this._commandedSpeed = mps;
   }
 
   setWind(speedMps: number, directionDegrees: number): void {
@@ -219,17 +236,37 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this._currentLon += (Math.random() - 0.5) * this.config.gpsNoiseMeters / (111320 * Math.cos((this._currentLat * Math.PI) / 180));
 
     // Battery drain
-    this._currentBattery = Math.max(0, this._currentBattery - this.config.drainRatePerSecond * dt * 100);
+    // drainRatePerSecond is percentage points per second, so a full pack with
+// the default 0.083 lasts ~1200s (20 min) of flight.
+    this._currentBattery = Math.max(
+      0,
+      this._currentBattery - this.config.drainRatePerSecond * dt,
+    );
 
-    // Wind effect
+    // Wind: push the aircraft along the wind vector rather than the random-walk
+    // the previous implementation used (which drifted without ever damping, so
+    // vertical speed diverged instead of settling).
     const windRad = (this.config.windDirectionDegrees * Math.PI) / 180;
-    this._currentVSpeed += (Math.random() - 0.5) * 0.1; // turbulence
-    this._currentSpeed = Math.max(0, this._currentSpeed + (Math.random() - 0.5) * 0.2);
+    const windPushMps = this.config.windSpeedMps * 0.15;
+    const groundDriftLat = (windPushMps * dt * Math.cos(windRad)) / 111320;
+    const groundDriftLon = (windPushMps * dt * Math.sin(windRad)) / (111320 * Math.cos((this._currentLat * Math.PI) / 180));
+    this._currentLat += groundDriftLat;
+    this._currentLon += groundDriftLon;
 
-    // Distance from home
-    const dLat = this._currentLat - this.config.startLatitude;
-    const dLon = this._currentLon - this.config.startLongitude;
-    this._distanceFromHome = Math.sqrt(dLat * dLat + dLon * dLon) * 111320;
+    // Turbulence decays back to a commanded vertical speed instead of
+    // accumulating without bound.
+    this._commandedVspeed = this._commandedVspeed ?? 0;
+    this._currentVSpeed += (this._commandedVspeed - this._currentVSpeed) * 0.1;
+    this._currentVSpeed += (Math.random() - 0.5) * 0.05;
+
+    // Speed also settles toward the commanded value rather than drifting.
+    this._currentSpeed += (this._commandedSpeed - this._currentSpeed) * 0.1;
+    this._currentSpeed = Math.max(0, this._currentSpeed);
+
+    // Distance from home (metres), accounting for longitude convergence.
+    const dLat = (this._currentLat - this.config.startLatitude) * 111320;
+    const dLon = (this._currentLon - this.config.startLongitude) * 111320 * Math.cos((this._currentLat * Math.PI) / 180);
+    this._distanceFromHome = Math.sqrt(dLat * dLat + dLon * dLon);
   }
 
   private _buildTelemetry(): Telemetry {
@@ -249,7 +286,7 @@ export class SimulatorDroneAdapter implements DroneAdapter {
       voltage: 12.6 * (this._currentBattery / 100),
       gpsFix: this._connectionState === "CONNECTED",
       satelliteCount: 8 + Math.floor(Math.random() * 8),
-      flightMode: "SIMULATED",
+      flightMode: this._flightMode,
       connectionState: this._connectionState,
       homeLatitude: this.config.startLatitude,
       homeLongitude: this.config.startLongitude,
@@ -262,6 +299,13 @@ export class SimulatorDroneAdapter implements DroneAdapter {
 
   private _normalizeAngle(deg: number): number {
     return ((deg % 360) + 360) % 360;
+  }
+
+  /** Compass bearing from the current position to a target. */
+  private _bearingTo(lat: number, lon: number): number {
+    const dLat = lat - this._currentLat;
+    const dLon = (lon - this._currentLon) * Math.cos((this._currentLat * Math.PI) / 180);
+    return this._normalizeAngle((Math.atan2(dLon, dLat) * 180) / Math.PI);
   }
 
   private _stopAll(): void {

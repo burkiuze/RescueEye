@@ -1,26 +1,133 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RescueEye — AI Search & Rescue UAV Command Center</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RescueEye — Search &amp; Rescue Command Centre</title>
   <link rel="stylesheet" href="/styles.css">
-  <style>
-    /* Inline critical styles to prevent FOUC */
-    body { background: #0a0e14; color: #e0e8f0; margin: 0; overflow: hidden; }
-    #app { height: 100vh; width: 100vw; }
-  </style>
 </head>
 <body>
-  <div id="app">
-    <div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#8899aa;">
-      <div style="text-align:center;">
-        <h1 style="color:#00ff88;font-size:24px;margin-bottom:8px;">🛸 RescueEye</h1>
-        <p>Initializing command center...</p>
-        <p style="font-size:11px;margin-top:16px;color:#556677;">v1.0.0 — AI-Powered Search & Rescue UAV Platform</p>
-      </div>
-    </div>
+  <!-- Operator sign-in. Nothing above this screen may be shown before a
+       token is held: the console is the only place aircraft state appears. -->
+  <div id="gate" class="gate">
+    <form id="gate-form" class="gate-card" autocomplete="off">
+      <h1 class="gate-title">RESCUEEYE</h1>
+      <p class="gate-sub">Search &amp; Rescue Command Centre</p>
+      <label class="gate-label" for="token">Operator token</label>
+      <input id="token" name="token" type="password" class="gate-input"
+             placeholder="paste the token issued at startup" required>
+      <button type="submit" class="gate-btn">Sign in</button>
+      <p id="gate-error" class="gate-error" hidden></p>
+      <p class="gate-hint">
+        Tokens are printed once when the server starts. Role decides what you can
+        do: <b>observer</b> watches, <b>operator</b> runs missions,
+        <b>safety</b> commands the aircraft and overrides failsafes.
+      </p>
+    </form>
   </div>
-  <script src="/bundle.js"></script>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="logo">RESCUEEYE</span>
+        <span id="link" class="pill pill-off">OFFLINE</span>
+        <span id="who" class="who"></span>
+      </div>
+      <div class="topbar-center">
+        <span id="mission" class="mission-line">NO ACTIVE MISSION</span>
+      </div>
+      <div class="topbar-right">
+        <span id="safety" class="pill pill-ok">SAFETY NORMAL</span>
+        <span id="clock" class="clock">--:--:--</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="col col-left">
+        <section class="panel">
+          <h2>Missions</h2>
+          <div id="missions" class="list"><p class="empty">none</p></div>
+          <div class="row">
+            <input id="mission-name" class="input" placeholder="new mission name">
+            <button id="mission-new" class="btn">Create</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Controls</h2>
+          <div class="grid2">
+            <button id="act-start" class="btn">Start</button>
+            <button id="act-pause" class="btn">Pause</button>
+            <button id="act-abort" class="btn btn-danger">Abort</button>
+            <button id="act-rth" class="btn btn-warn">RTH</button>
+            <button id="act-land" class="btn btn-warn">Land</button>
+            <button id="act-logout" class="btn btn-ghost">Sign out</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Failsafe overrides</h2>
+          <p class="hint">
+            Suppressing an automated safety action is recorded and time-boxed.
+            It requires a written reason.
+          </p>
+          <div class="row">
+            <input id="ovr-state" class="input" placeholder="e.g. LOW_BATTERY_WARNING">
+          </div>
+          <div class="row">
+            <input id="ovr-reason" class="input" placeholder="justification (10+ chars)">
+          </div>
+          <div class="row">
+            <button id="ovr-add" class="btn btn-warn">Override</button>
+          </div>
+          <div id="overrides" class="list"><p class="empty">none</p></div>
+        </section>
+      </aside>
+
+      <main class="col col-center">
+        <section class="panel panel-grow">
+          <h2>Aircraft</h2>
+          <div class="fieldgrid">
+            <div class="field"><span class="k">ALT</span><span class="v" id="t-alt">--</span></div>
+            <div class="field"><span class="k">SPD</span><span class="v" id="t-spd">--</span></div>
+            <div class="field"><span class="k">V/S</span><span class="v" id="t-vs">--</span></div>
+            <div class="field"><span class="k">HDG</span><span class="v" id="t-hdg">--</span></div>
+            <div class="field"><span class="k">BAT</span><span class="v" id="t-bat">--</span></div>
+            <div class="field"><span class="k">V</span><span class="v" id="t-volt">--</span></div>
+            <div class="field"><span class="k">GPS</span><span class="v" id="t-gps">--</span></div>
+            <div class="field"><span class="k">SAT</span><span class="v" id="t-sat">--</span></div>
+            <div class="field"><span class="k">MODE</span><span class="v" id="t-mode">--</span></div>
+            <div class="field"><span class="k">LINK</span><span class="v" id="t-link">--</span></div>
+            <div class="field"><span class="k">HOME</span><span class="v" id="t-home">--</span></div>
+            <div class="field"><span class="k">TIME</span><span class="v" id="t-time">--</span></div>
+          </div>
+          <canvas id="map" class="map" width="640" height="320"></canvas>
+        </section>
+      </main>
+
+      <aside class="col col-right">
+        <section class="panel">
+          <h2>Detections</h2>
+          <p class="hint warn-hint">
+            Findings marked <b>SIMULATED</b> are generated by the demo path.
+            They are not people. Do not direct a team to one.
+          </p>
+          <div id="detections" class="list"><p class="empty">none</p></div>
+        </section>
+
+        <section class="panel panel-grow">
+          <h2>Event timeline</h2>
+          <div id="events" class="timeline"><p class="empty">none</p></div>
+        </section>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span id="health" class="health">health --</span>
+      <span id="toast" class="toast" hidden></span>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
 </body>
 </html>

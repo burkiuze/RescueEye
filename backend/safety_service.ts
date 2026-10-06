@@ -50,6 +50,8 @@ export class SafetyService {
   private thresholds: SafetyThresholds;
   private currentState: SafetyState = "NORMAL";
   private previousState: SafetyState = "NORMAL";
+  /** Last emission time per state, used to suppress repeats. */
+  private _lastEmitted = new Map<SafetyState, number>();
   private events: SafetyEvent[] = [];
   private _listeners: Array<(event: SafetyEvent) => void> = [];
   private _lastTelemetry: Telemetry | null = null;
@@ -66,36 +68,63 @@ export class SafetyService {
     };
   }
 
+  /**
+   * Evaluate one telemetry frame.
+   *
+   * Events are emitted on the *transition* into a condition, not on every
+   * frame that still satisfies it. Without this, a 10 Hz stream with the pack
+   * at 3% would emit ~10 emergency-landing commands per second, flooding the
+   * event log and the operator console until it became unreadable — which is
+   * exactly when an operator most needs to read it.
+   */
   evaluate(telemetry: Telemetry): SafetyEvent[] {
     this._lastTelemetry = telemetry;
     const newEvents: SafetyEvent[] = [];
+    const now = Date.now();
+
+    // Repeat suppression: the same condition re-firing only after a cooldown.
+    // Chosen to be comfortably longer than a telemetry drop-out so a brief
+    // sensor glitch does not re-announce, but short enough that a genuinely
+    // new occurrence is still reported.
+    const repeatCooldownMs = 30_000;
+
+    const shouldEmit = (state: SafetyState): boolean => {
+      const last = this._lastEmitted.get(state) ?? 0;
+      if (now - last < repeatCooldownMs) return false;
+      this._lastEmitted.set(state, now);
+      return true;
+    };
 
     // Check battery
     if (telemetry.batteryPercentage <= this.thresholds.criticalBatteryPercent) {
-      const evt = this._createEvent(
-        "CRITICAL_BATTERY",
-        telemetry,
-        {
-          type: "EMERGENCY_LANDING",
-          description: `Battery critical at ${telemetry.batteryPercentage.toFixed(1)}% — emergency landing required`,
-          priority: 1,
-          requiresOperatorConfirmation: false,
-        }
-      );
-      newEvents.push(evt);
+      if (shouldEmit("CRITICAL_BATTERY")) {
+        const evt = this._createEvent(
+          "CRITICAL_BATTERY",
+          telemetry,
+          {
+            type: "EMERGENCY_LANDING",
+            description: `Battery critical at ${telemetry.batteryPercentage.toFixed(1)}% — emergency landing required`,
+            priority: 1,
+            requiresOperatorConfirmation: false,
+          }
+        );
+        newEvents.push(evt);
+      }
       this._transitionTo("CRITICAL_BATTERY");
     } else if (telemetry.batteryPercentage <= this.thresholds.lowBatteryPercent) {
-      const evt = this._createEvent(
-        "LOW_BATTERY_WARNING",
-        telemetry,
-        {
-          type: "RTH_REQUESTED",
-          description: `Battery low at ${telemetry.batteryPercentage.toFixed(1)}% — return to home recommended`,
-          priority: 2,
-          requiresOperatorConfirmation: true,
-        }
-      );
-      newEvents.push(evt);
+      if (shouldEmit("LOW_BATTERY_WARNING")) {
+        const evt = this._createEvent(
+          "LOW_BATTERY_WARNING",
+          telemetry,
+          {
+            type: "RTH_REQUESTED",
+            description: `Battery low at ${telemetry.batteryPercentage.toFixed(1)}% — return to home recommended`,
+            priority: 2,
+            requiresOperatorConfirmation: true,
+          }
+        );
+        newEvents.push(evt);
+      }
       this._transitionTo("LOW_BATTERY_WARNING");
     } else if (this.currentState === "LOW_BATTERY_WARNING" && telemetry.batteryPercentage > this.thresholds.lowBatteryPercent + 5) {
       this._transitionTo("NORMAL");
@@ -103,17 +132,19 @@ export class SafetyService {
 
     // Check GPS
     if (!telemetry.gpsFix || telemetry.satelliteCount < this.thresholds.minSatellites) {
-      const evt = this._createEvent(
-        "GPS_DEGRADED",
-        telemetry,
-        {
-          type: "WARNING",
-          description: `GPS degraded: fix=${telemetry.gpsFix}, satellites=${telemetry.satelliteCount}`,
-          priority: 3,
-          requiresOperatorConfirmation: true,
-        }
-      );
-      newEvents.push(evt);
+      if (shouldEmit("GPS_DEGRADED")) {
+        const evt = this._createEvent(
+          "GPS_DEGRADED",
+          telemetry,
+          {
+            type: "WARNING",
+            description: `GPS degraded: fix=${telemetry.gpsFix}, satellites=${telemetry.satelliteCount}`,
+            priority: 3,
+            requiresOperatorConfirmation: true,
+          }
+        );
+        newEvents.push(evt);
+      }
       if (this.currentState === "NORMAL") this._transitionTo("GPS_DEGRADED");
     } else if (this.currentState === "GPS_DEGRADED" && telemetry.gpsFix && telemetry.satelliteCount >= this.thresholds.minSatellites) {
       this._transitionTo("NORMAL");
@@ -121,17 +152,19 @@ export class SafetyService {
 
     // Check connection
     if (telemetry.connectionState === "LOST") {
-      const evt = this._createEvent(
-        "CONNECTION_LOST",
-        telemetry,
-        {
-          type: "CRITICAL",
-          description: "Telemetry connection lost — failsafe triggered",
-          priority: 1,
-          requiresOperatorConfirmation: false,
-        }
-      );
-      newEvents.push(evt);
+      if (shouldEmit("CONNECTION_LOST")) {
+        const evt = this._createEvent(
+          "CONNECTION_LOST",
+          telemetry,
+          {
+            type: "CRITICAL",
+            description: "Telemetry connection lost — failsafe triggered",
+            priority: 1,
+            requiresOperatorConfirmation: false,
+          }
+        );
+        newEvents.push(evt);
+      }
       this._transitionTo("CONNECTION_LOST");
     } else if (telemetry.connectionState === "CONNECTED" && this.currentState === "CONNECTION_LOST") {
       this._transitionTo("NORMAL");
@@ -139,33 +172,37 @@ export class SafetyService {
 
     // Check distance from home
     if (telemetry.distanceFromHomeMeters > this.thresholds.maxDistanceFromHomeMeters) {
-      const evt = this._createEvent(
-        "GEOFENCE_WARNING",
-        telemetry,
-        {
-          type: "WARNING",
-          description: `UAV ${telemetry.distanceFromHomeMeters.toFixed(0)}m from home — geofence warning`,
-          priority: 4,
-          requiresOperatorConfirmation: false,
-        }
-      );
-      newEvents.push(evt);
+      if (shouldEmit("GEOFENCE_WARNING")) {
+        const evt = this._createEvent(
+          "GEOFENCE_WARNING",
+          telemetry,
+          {
+            type: "WARNING",
+            description: `UAV ${telemetry.distanceFromHomeMeters.toFixed(0)}m from home — geofence warning`,
+            priority: 4,
+            requiresOperatorConfirmation: false,
+          }
+        );
+        newEvents.push(evt);
+      }
       if (this.currentState === "NORMAL") this._transitionTo("GEOFENCE_WARNING");
     }
 
     // Check wind
     if (telemetry.groundSpeed > this.thresholds.maxWindSpeedMps) {
-      const evt = this._createEvent(
-        "HIGH_WIND_WARNING",
-        telemetry,
-        {
-          type: "WARNING",
-          description: `High wind detected: ${telemetry.groundSpeed.toFixed(1)} m/s`,
-          priority: 5,
-          requiresOperatorConfirmation: false,
-        }
-      );
-      newEvents.push(evt);
+      if (shouldEmit("HIGH_WIND_WARNING")) {
+        const evt = this._createEvent(
+          "HIGH_WIND_WARNING",
+          telemetry,
+          {
+            type: "WARNING",
+            description: `High wind detected: ${telemetry.groundSpeed.toFixed(1)} m/s`,
+            priority: 5,
+            requiresOperatorConfirmation: false,
+          }
+        );
+        newEvents.push(evt);
+      }
     }
 
     // Manual operator control always wins — if operator sends a command,

@@ -1,7 +1,27 @@
 // RescueEye — Drone Abstraction Layer
 // Clean interfaces separating the application from autopilot implementation.
 
-import type { DroneAdapter, Telemetry, FlightMode, ConnectionState } from "./models";
+// The adapter contract lives in shared/models and is re-exported here so that
+// drone-layer code can import everything it needs from a single module.
+import type {
+  DroneAdapter,
+  Telemetry,
+  FlightMode,
+  ConnectionState,
+  CameraSource,
+  CameraStats,
+  VideoFrame,
+} from "../shared/models";
+
+export type {
+  DroneAdapter,
+  Telemetry,
+  FlightMode,
+  ConnectionState,
+  CameraSource,
+  CameraStats,
+  VideoFrame,
+};
 
 // ── Adapter Factory ────────────────────────────────────────────────────
 

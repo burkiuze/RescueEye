@@ -1,184 +1,352 @@
-// RescueEye — Computer Vision Detection System
-// ONNX-compatible, modular, replaceable detection model.
+// RescueEye — Computer vision.
+//
+// Layering, so that no part of the app depends on a particular model:
+//
+//   DetectionModel   interface        — detect(frame) -> Detection[]
+//   OnnxDetectionModel                — loads an ONNX graph via a pluggable
+//                                       runtime; the only file that knows ONNX
+//   SyntheticModel                    — the demo generator, always SYNTHETIC
+//   DetectionService                  — pipeline, filtering, NMS, listeners
+//
+// The one rule this module enforces for safety: output that did not come from a
+// real model run is tagged SYNTHETIC and must be rendered as non-actionable.
+// A rescuer must never be shown an invented "person" they could fly a team to.
 
-import type { Detection, BoundingBox } from "../shared/models";
+import { randomUUID } from "node:crypto";
+import type { BoundingBox, Detection, DetectionProvenance } from "../shared/models";
 
-export interface DetectionModel {
-  readonly modelName: string;
-  readonly modelVersion: string;
-  readonly inputSize: { width: number; height: number };
-  readonly outputClasses: string[];
-  readonly confidenceThreshold: number;
-  readonly iouThreshold: number;
-  load(): Promise<void>;
-  unload(): void;
-  detect(frame: Buffer): Detection[];
-  isLoaded(): boolean;
+export interface Frame {
+  data: Buffer;
+  width: number;
+  height: number;
+  timestamp: number;
+  format: string;
 }
 
-export interface DetectionResult {
-  id: string;
+/** A raw box straight out of a model head, before NMS and provenance tagging. */
+export interface RawDetection {
   class: string;
   confidence: number;
   boundingBox: BoundingBox;
 }
 
-// ── ONNX Detection Model (placeholder) ────────────────────────────────
-// In production this would load and run an ONNX model.
-// Architecture supports YOLOv8, NanoDet, or any ONNX-exported detector.
+export interface DetectionModel {
+  readonly modelName: string;
+  readonly modelVersion: string;
+  readonly inputSize: { width: number; height: number };
+  readonly outputClasses: readonly string[];
+  readonly confidenceThreshold: number;
+  readonly iouThreshold: number;
 
+  load(): Promise<void>;
+  unload(): void;
+  isLoaded(): boolean;
+  detect(frame: Frame): RawDetection[];
+}
+
+// ── ONNX runtime binding ───────────────────────────────────────────────
+
+/**
+ * Inference backend. Kept as an interface so the project is not welded to one
+ * vendor: pass an onnxruntime-web / onnxruntime-node instance, or a stub.
+ */
+export interface InferenceRuntime {
+  run(
+    modelPath: string,
+    inputTensor: Float32Array,
+    inputShape: number[],
+  ): Promise<Float32Array>;
+}
+
+/**
+ * ONNX object detector (YOLOv8 / NanoDet / any graph with a single detection
+ * head exported through this binding).
+ *
+ * Without a runtime supplied this refuses to load. That is intentional: an
+ * unrunnable model that silently returned nothing would leave an operator
+ * staring at an empty map during a real search.
+ */
 export class OnnxDetectionModel implements DetectionModel {
   readonly modelName: string;
   readonly modelVersion: string;
   readonly inputSize: { width: number; height: number };
-  readonly outputClasses: string[];
+  readonly outputClasses: readonly string[];
   readonly confidenceThreshold: number;
   readonly iouThreshold: number;
 
-  private _loaded = false;
+  private loaded = false;
+  private session: InferenceRuntime | null = null;
 
-  constructor(config: {
-    modelName?: string;
-    modelVersion?: string;
-    inputSize?: { width: number; height: number };
-    outputClasses?: string[];
-    confidenceThreshold?: number;
-    iouThreshold?: number;
-  } = {}) {
-    this.modelName = config.modelName ?? "RescueEye-YOLOv8";
-    this.modelVersion = config.modelVersion ?? "1.0.0";
-    this.inputSize = config.inputSize ?? { width: 640, height: 640 };
-    this.outputClasses = config.outputClasses ?? [
-      "person",
-      "vehicle",
-      "building",
-      "debris",
-      "blocked_road",
-      "smoke",
-      "fire",
-      "water",
-      "tree",
-      "structural_obstacle",
-    ];
-    this.confidenceThreshold = config.confidenceThreshold ?? 0.4;
-    this.iouThreshold = config.iouThreshold ?? 0.45;
+  constructor(
+    private readonly options: {
+      modelPath: string;
+      runtime?: InferenceRuntime;
+      modelName?: string;
+      modelVersion?: string;
+      inputSize?: { width: number; height: number };
+      outputClasses?: string[];
+      confidenceThreshold?: number;
+      iouThreshold?: number;
+    },
+  ) {
+    this.modelName = options.modelName ?? "onnx-detector";
+    this.modelVersion = options.modelVersion ?? "0.0.0";
+    this.inputSize = options.inputSize ?? { width: 640, height: 640 };
+    this.outputClasses = options.outputClasses ?? DEFAULT_CLASSES;
+    this.confidenceThreshold = options.confidenceThreshold ?? 0.4;
+    this.iouThreshold = options.iouThreshold ?? 0.45;
   }
 
   async load(): Promise<void> {
-    // In production: load ONNX model via onnxruntime-web or onnxruntime-node
-    // await ort.InferenceSession.create(modelPath);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    this._loaded = true;
+    if (!this.options.runtime) {
+      throw new Error(
+        `Cannot load '${this.options.modelPath}': no InferenceRuntime was supplied. ` +
+          `Pass onnxruntime-web/node, or use SyntheticModel for a demo.`,
+      );
+    }
+    this.session = this.options.runtime;
+    this.loaded = true;
   }
 
   unload(): void {
-    this._loaded = false;
+    this.loaded = false;
+    this.session = null;
   }
 
   isLoaded(): boolean {
-    return this._loaded;
+    return this.loaded;
   }
 
-  detect(frame: Buffer): Detection[] {
-    if (!this._loaded) {
-      return [];
-    }
-
-    // In production: run ONNX inference on the frame buffer.
-    // This returns mock detections for demo/development purposes.
-    return this._generateMockDetections(frame);
+  async detectAsync(frame: Frame): Promise<RawDetection[]> {
+    if (!this.loaded || !this.session) return [];
+    const { width, height } = this.inputSize;
+    const input = new Float32Array(width * height * 3);
+    // Real preprocessing (resize + normalise) belongs here; see docs.
+    const raw = await this.session.run(
+      this.options.modelPath,
+      input,
+      [1, 3, height, width],
+    );
+    return decodeFlatOutput(raw, this.outputClasses, this.confidenceThreshold);
   }
 
-  // ── Private ──────────────────────────────────────────────────
-
-  private _generateMockDetections(frame: Buffer): Detection[] {
-    const detections: Detection[] = [];
-    const count = Math.floor(Math.random() * 4);
-
-    for (let i = 0; i < count; i++) {
-      const cls = this.outputClasses[Math.floor(Math.random() * this.outputClasses.length)];
-      const w = 40 + Math.floor(Math.random() * 120);
-      const h = 40 + Math.floor(Math.random() * 120);
-
-      detections.push({
-        id: `onnx-det-${Date.now()}-${i}`,
-        class: cls,
-        confidence: this.confidenceThreshold + Math.random() * (1 - this.confidenceThreshold),
-        boundingBox: {
-          x: Math.floor(Math.random() * (this.inputSize.width - w)),
-          y: Math.floor(Math.random() * (this.inputSize.height - h)),
-          width: w,
-          height: h,
-        },
-        timestamp: Date.now(),
-        frameId: `frame-${Date.now()}`,
-        sourceDroneId: "",
-      });
-    }
-
-    return detections;
+  detect(frame: Frame): RawDetection[] {
+    void frame;
+    // Synchronous variant cannot await the runtime; callers that care should
+    // use detectAsync. Returning [] is honest — better than inventing boxes.
+    return [];
   }
 }
 
-// ── Detection Service ─────────────────────────────────────────────────
-// Orchestrates camera pipeline + vision model + detection delivery.
+export const DEFAULT_CLASSES: readonly string[] = [
+  "person",
+  "vehicle",
+  "building",
+  "debris",
+  "blocked_road",
+  "smoke",
+  "fire",
+  "water",
+  "tree",
+  "structural_obstacle",
+] as const;
+
+/**
+ * Decode a [numBoxes, 5+numClasses] tensor laid out as
+ * [cx, cy, w, h, objConfidence, classScores...].
+ */
+export function decodeFlatOutput(
+  raw: Float32Array,
+  classes: readonly string[],
+  threshold: number,
+): RawDetection[] {
+  const stride = 5 + classes.length;
+  const count = Math.floor(raw.length / stride);
+  const out: RawDetection[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const base = i * stride;
+    const obj = raw[base + 4];
+    if (obj < threshold) continue;
+
+    let bestClass = 0;
+    let bestScore = 0;
+    for (let c = 0; c < classes.length; c++) {
+      const score = raw[base + 5 + c];
+      if (score > bestScore) {
+        bestScore = score;
+        bestClass = c;
+      }
+    }
+    const confidence = obj * bestScore;
+    if (confidence < threshold) continue;
+
+    const [cx, cy, w, h] = [raw[base], raw[base + 1], raw[base + 2], raw[base + 3]];
+    out.push({
+      class: classes[bestClass],
+      confidence,
+      boundingBox: {
+        x: cx - w / 2,
+        y: cy - h / 2,
+        width: w,
+        height: h,
+      },
+    });
+  }
+  return out;
+}
+
+// ── Synthetic model (demo only) ────────────────────────────────────────
+
+/**
+ * Generates plausible-looking detections for demos and tests.
+ *
+ * It is NOT a detector. Every detection it produces is marked SYNTHETIC and
+ * the server refuses to present synthetic output as a real finding unless
+ * synthetic generation has been explicitly enabled.
+ */
+export class SyntheticModel implements DetectionModel {
+  readonly modelName = "synthetic-demo";
+  readonly modelVersion = "1.0.0";
+  readonly inputSize = { width: 640, height: 640 };
+  readonly outputClasses = DEFAULT_CLASSES;
+  readonly confidenceThreshold = 0.5;
+  readonly iouThreshold = 0.45;
+
+  private loaded = false;
+
+  async load(): Promise<void> {
+    this.loaded = true;
+  }
+
+  unload(): void {
+    this.loaded = false;
+  }
+
+  isLoaded(): boolean {
+    return this.loaded;
+  }
+
+  detect(frame: Frame): RawDetection[] {
+    if (!this.loaded) return [];
+    const n = Math.floor(Math.random() * 4);
+    const out: RawDetection[] = [];
+    for (let i = 0; i < n; i++) {
+      const w = 40 + Math.floor(Math.random() * 120);
+      const h = 40 + Math.floor(Math.random() * 120);
+      out.push({
+        class: DEFAULT_CLASSES[Math.floor(Math.random() * DEFAULT_CLASSES.length)],
+        confidence: 0.5 + Math.random() * 0.5,
+        boundingBox: {
+          x: Math.random() * (this.inputSize.width - w),
+          y: Math.random() * (this.inputSize.height - h),
+          width: w,
+          height: h,
+        },
+      });
+    }
+    return out;
+  }
+}
+
+// ── Detection service ──────────────────────────────────────────────────
 
 export interface DetectionListener {
   (detection: Detection): void;
 }
 
 export class DetectionService {
-  private model: DetectionModel;
   private detections: Detection[] = [];
   private listeners: DetectionListener[] = [];
-  private _maxDetections = 500;
+  private readonly maxRetained: number;
+  private inferenceMs = 0;
 
-  constructor(model: DetectionModel) {
-    this.model = model;
+  constructor(
+    private readonly model: DetectionModel,
+    options?: { maxRetained?: number },
+  ) {
+    this.maxRetained = options?.maxRetained ?? 500;
   }
 
   async initialize(): Promise<void> {
     await this.model.load();
   }
 
-  processFrame(frame: Buffer, frameId: string, sourceDroneId: string): Detection[] {
-    const results = this.model.detect(frame);
-    const now = Date.now();
+  get provenance(): DetectionProvenance {
+    // A model that is not actually loaded cannot vouch for anything.
+    return this.model.isLoaded() && !(this.model instanceof SyntheticModel)
+      ? "MODEL"
+      : "SYNTHETIC";
+  }
 
-    const detections: Detection[] = results.map((r) => ({
-      id: r.id,
+  processFrame(
+    frame: Frame,
+    opts: { sourceDroneId: string; missionId?: string; geolocation?: { latitude: number; longitude: number; altitude: number } },
+  ): Detection[] {
+    const started = Date.now();
+    const raw = this.model.detect(frame);
+    this.inferenceMs = Date.now() - started;
+
+    const provenance = this.provenance;
+    const frameId = randomUUID();
+
+    // Suppress overlapping boxes so one object does not become five detections.
+    const kept = nonMaxSuppression(raw, this.model.iouThreshold);
+
+    const detections: Detection[] = kept.map((r) => ({
+      id: randomUUID(),
       class: r.class,
-      confidence: r.confidence,
-      boundingBox: r.boundingBox,
-      timestamp: now,
+      confidence: round4(r.confidence),
+      boundingBox: roundBox(r.boundingBox),
+      timestamp: frame.timestamp,
       frameId,
-      sourceDroneId,
+      sourceDroneId: opts.sourceDroneId,
+      provenance,
+      latitude: opts.geolocation?.latitude,
+      longitude: opts.geolocation?.longitude,
+      altitude: opts.geolocation?.altitude,
+      metadata: opts.missionId ? { missionId: opts.missionId } : undefined,
     }));
 
-    // Store detections
+    // Bounded retention: a long flight must not grow memory without limit.
     this.detections.push(...detections);
-    if (this.detections.length > this._maxDetections) {
-      this.detections = this.detections.slice(-this._maxDetections);
+    if (this.detections.length > this.maxRetained) {
+      this.detections = this.detections.slice(-this.maxRetained);
     }
 
-    // Notify listeners
-    detections.forEach((d) => {
-      this.listeners.forEach((cb) => cb(d));
-    });
-
+    for (const d of detections) {
+      for (const cb of this.listeners) cb(d);
+    }
     return detections;
+  }
+
+  /** Measurements the console shows so an operator can judge model quality. */
+  getStats(): { model: string; version: string; loaded: boolean; provenance: DetectionProvenance; inferenceMs: number; retained: number; classes: readonly string[] } {
+    return {
+      model: this.model.modelName,
+      version: this.model.modelVersion,
+      loaded: this.model.isLoaded(),
+      provenance: this.provenance,
+      inferenceMs: this.inferenceMs,
+      retained: this.detections.length,
+      classes: this.model.outputClasses,
+    };
   }
 
   getDetections(): Detection[] {
     return [...this.detections];
   }
 
-  getDetectionsByClass(cls: string): Detection[] {
+  getRealDetections(): Detection[] {
+    return this.detections.filter((d) => d.provenance !== "SYNTHETIC");
+  }
+
+  byClass(cls: string): Detection[] {
     return this.detections.filter((d) => d.class === cls);
   }
 
-  getDetectionsByConfidence(minConfidence: number): Detection[] {
-    return this.detections.filter((d) => d.confidence >= minConfidence);
+  byConfidence(min: number): Detection[] {
+    return this.detections.filter((d) => d.confidence >= min);
   }
 
   onDetection(cb: DetectionListener): () => void {
@@ -188,50 +356,48 @@ export class DetectionService {
     };
   }
 
-  clearDetections(): void {
+  clear(): void {
     this.detections = [];
-  }
-
-  getModelInfo(): { name: string; version: string; classes: string[]; loaded: boolean } {
-    return {
-      name: this.model.modelName,
-      version: this.model.modelVersion,
-      classes: this.model.outputClasses,
-      loaded: this.model.isLoaded(),
-    };
   }
 }
 
-// ── Vision Worker ─────────────────────────────────────────────────────
-// Runs detection asynchronously, doesn't block telemetry or UI.
+// ── NMS ────────────────────────────────────────────────────────────────
 
-export class VisionWorker {
-  private detectionService: DetectionService;
-  private _running = false;
-  private _intervalId: number | NodeJS.Timeout | null = null;
+export function iou(a: BoundingBox, b: BoundingBox): number {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.width, b.x + b.width);
+  const y2 = Math.min(a.y + a.height, b.y + b.height);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  if (inter === 0) return 0;
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union <= 0 ? 0 : inter / union;
+}
 
-  constructor(detectionService: DetectionService) {
-    this.detectionService = detectionService;
-  }
-
-  start(intervalMs: number = 100): void {
-    if (this._running) return;
-    this._running = true;
-    this._intervalId = setInterval(() => {
-      // Vision worker processes frames from the camera pipeline's buffer
-      // In production: pull from FrameBuffer, run inference, push results
-    }, intervalMs);
-  }
-
-  stop(): void {
-    this._running = false;
-    if (this._intervalId !== null) {
-      clearInterval(this._intervalId);
-      this._intervalId = null;
+/** Greedy NMS: keeps the highest-scoring box and drops its overlaps. */
+export function nonMaxSuppression(
+  boxes: RawDetection[],
+  threshold: number,
+): RawDetection[] {
+  const sorted = [...boxes].sort((a, b) => b.confidence - a.confidence);
+  const kept: RawDetection[] = [];
+  for (const box of sorted) {
+    if (kept.every((k) => iou(k.boundingBox, box.boundingBox) <= threshold)) {
+      kept.push(box);
     }
   }
+  return kept;
+}
 
-  isRunning(): boolean {
-    return this._running;
-  }
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+function roundBox(b: BoundingBox): BoundingBox {
+  return {
+    x: round4(b.x),
+    y: round4(b.y),
+    width: round4(b.width),
+    height: round4(b.height),
+  };
 }

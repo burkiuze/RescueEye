@@ -1,6 +1,7 @@
 // RescueEye — Drone Adapter Factory
 // Creates the appropriate adapter based on configuration.
 
+import type { ConnectionState } from "../shared/models";
 import type { DroneAdapter, DroneAdapterFactory, AdapterType } from "./adapter";
 import { MavlinkDroneAdapter } from "./mavlink_adapter";
 import { MavsdkDroneAdapter } from "./mavsdk_adapter";
@@ -8,24 +9,62 @@ import type { MavlinkConfig, MavsdkConfig } from "./adapter";
 
 export class DroneAdapterFactoryImpl implements DroneAdapterFactory {
   create(type: AdapterType, config?: Record<string, unknown>): DroneAdapter {
+    // Config arrives as an untyped bag from the caller; validate the fields the
+    // concrete adapter actually needs rather than blind-casting, so a typo in
+    // configuration fails loudly at startup instead of at first flight command.
     switch (type) {
-      case "mavlink":
-        return new MavlinkDroneAdapter(
-          (config?.droneId as string) ?? "mavlink-001",
-          config as MavlinkConfig
-        );
-      case "mavsdk":
-        return new MavsdkDroneAdapter(
-          (config?.droneId as string) ?? "mavsdk-001",
-          config as MavsdkConfig
-        );
+      case "mavlink": {
+        const cfg = requireMavlinkConfig(config);
+        return new MavlinkDroneAdapter(str(config?.droneId, "mavlink-001"), cfg);
+      }
+      case "mavsdk": {
+        const cfg = requireMavsdkConfig(config);
+        return new MavsdkDroneAdapter(str(config?.droneId, "mavsdk-001"), cfg);
+      }
       case "simulator":
-        // Simulator is created separately; this factory handles real adapters.
-        throw new Error("Use SimulatorDroneAdapter for simulator mode");
+        throw new Error(
+          "SimulatorDroneAdapter is constructed directly; it takes SimulatorConfig, not this factory",
+        );
       default:
-        throw new Error(`Unknown adapter type: ${type}`);
+        throw new Error(`Unknown adapter type: ${String(type)}`);
     }
   }
+}
+
+function str(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function num(value: unknown, fallback: number, field: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${field} must be a finite number`);
+  }
+  return value;
+}
+
+function bool(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function requireMavlinkConfig(config?: Record<string, unknown>): MavlinkConfig {
+  return {
+    udpPort: num(config?.udpPort, 14550, "udpPort"),
+    tcpHost: typeof config?.tcpHost === "string" ? config.tcpHost : undefined,
+    tcpPort: config?.tcpPort === undefined ? undefined : num(config.tcpPort, 5760, "tcpPort"),
+    systemId: num(config?.systemId, 1, "systemId"),
+    componentId: num(config?.componentId, 1, "componentId"),
+    heartbeatIntervalMs: num(config?.heartbeatIntervalMs, 1000, "heartbeatIntervalMs"),
+    reconnectOnDisconnect: bool(config?.reconnectOnDisconnect, true),
+  };
+}
+
+function requireMavsdkConfig(config?: Record<string, unknown>): MavsdkConfig {
+  return {
+    serverAddress: str(config?.serverAddress, "127.0.0.1"),
+    port: num(config?.port, 50051, "port"),
+    droneId: num(config?.droneId, 1, "droneId"),
+  };
 }
 
 // ── Connection Manager ─────────────────────────────────────────────────

@@ -1,348 +1,244 @@
-# RescueEye — AI-Powered Search & Rescue UAV Platform
+# RescueEye — Architecture
 
-RescueEye is a real-drone search, rescue, and disaster-response platform. It helps rescue teams inspect dangerous areas, detect useful environmental information, monitor telemetry, and coordinate missions from a professional command interface.
-
-The system supports real UAV integration while providing a complete simulator when hardware is unavailable.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Operator Command Center                       │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌───────────┐  │
-│  │  Map /   │  │  Telemetry   │  │ Detections│  │ Mission   │  │
-│  │  Camera  │  │  Dashboard   │  │ Panel     │  │ Controls  │  │
-│  └────┬─────┘  └──────┬───────┘  └─────┬────┘  └─────┬─────┘  │
-│       │               │                │              │         │
-│  ─────┴───────────────┴────────────────┴──────────────┴─────────│
-│                    WebSocket (real-time)                        │
-│                    REST API (history/config)                    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────┼───────────────────────────────────┐
-│                    Backend Server (Node.js)                      │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │ Telemetry    │  │ Mission      │  │ Event / Alert          │ │
-│  │ Service      │  │ Service      │  │ Service                │ │
-│  └──────┬──────┘  └──────┬───────┘  └───────────┬────────────┘ │
-│         │                │                       │              │
-│  ┌──────┴────────────────┴───────────────────────┴────────────┐ │
-│  │              Safety & Failsafe Controller                  │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────┼───────────────────────────────────┐
-│               Drone Abstraction Layer                            │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  DroneAdapter (interface)                                  │  │
-│  │  ├── MavlinkDroneAdapter (PX4 / ArduPilot)                │  │
-│  │  ├── MavsdkDroneAdapter (MAVSDK protocol)                 │  │
-│  │  └── SimulatorDroneAdapter (no hardware needed)           │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────┼───────────────────────────────────┐
-│               Camera Pipeline                                      │
-│  Camera Source → Decoder → Frame Buffer → Vision Worker          │
-│  → Detection Service → Overlay Renderer → Operator UI            │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-┌─────────────────────────────┼───────────────────────────────────┐
-│               Computer Vision                                    │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  DetectionModel (interface)                                │  │
-│  │  ├── OnnxDetectionModel (ONNX-compatible, YOLOv8 etc.)   │  │
-│  │  └── (replaceable with any model)                         │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow
-
-**Drone / Simulator → Telemetry → Backend → Realtime → UI**
-1. Drone adapter (MAVLink, MAVSDK, or Simulator) generates telemetry at ~10 Hz
-2. TelemetryService validates and checks for alerts
-3. Backend broadcasts telemetry via WebSocket to all connected clients
-4. REST API provides mission history, configuration, and detection queries
-
-**Camera → Vision → Detection → Map/Overlay/Events**
-1. Camera source provides video frames (RTSP, UDP, local, USB)
-2. FrameBuffer holds a bounded queue of recent frames (drops old frames)
-3. VisionWorker runs detection asynchronously at ~10 Hz
-4. DetectionService processes results and notifies listeners
-5. Detections are broadcast to UI via WebSocket and overlaid on map/camera
+This document describes how the system is put together, and — just as
+importantly — which parts are not built yet.
 
 ---
 
-## Repository Structure
+## 1. Data flow
+
+### Telemetry path
 
 ```
-RescueEye/
-├── shared/
-│   └── models.ts              # Shared TypeScript types & interfaces
-├── drone/
-│   ├── adapter.ts             # DroneAdapter interface & factory
-│   ├── mavlink_adapter.ts     # MAVLink adapter (PX4/ArduPilot)
-│   ├── mavsdk_adapter.ts      # MAVSDK adapter
-│   └── connection_manager.ts  # Connection lifecycle & reconnect
-├── simulator/
-│   └── simulator_adapter.ts   # Realistic simulator (same API as real)
-├── vision/
-│   ├── camera_pipeline.ts     # Camera source → frame buffer → vision
-│   └── detection.ts           # ONNX detection model + detection service
-├── backend/
-│   ├── main.ts                # Server entry point
-│   ├── server.ts              # HTTP + WebSocket server
-│   ├── telemetry_service.ts   # Telemetry aggregation & alerting
-│   ├── mission_service.ts     # Mission lifecycle & event logging
-│   ├── safety_service.ts      # Failsafe & safety state machine
-│   ├── event_service.ts       # Structured event logging
-│   └── connection_manager.ts  # Connection management
-├── frontend/
-│   ├── index.html             # HTML entry point
-│   ├── styles.css             # Aviation-themed dark UI
-│   ├── app.ts                 # Main application class
-│   └── main.ts                # Entry point
-├── tests/
-│   └── rescueeye.test.ts      # Comprehensive test suite
-├── docs/
-│   ├── architecture.md        # This file
-│   └── README.md              # Project overview
-├── docs/
-│   └── architecture.md        # Architecture documentation
-├── package.json
-├── tsconfig.json
-└── README.md
+SimulatorDroneAdapter | MavlinkDroneAdapter
+            │
+            │ onTelemetry(Telemetry)   ~10 Hz
+            ▼
+    RescueEyeServer.onTelemetry
+            │
+            ├──► TelemetryService.update
+            │       ├── alert evaluation (low battery, GPS, link, timeout)
+            │       └── broadcast over WebSocket ──► console
+            │
+            └──► SafetyService.evaluate
+                    │
+                    ├── emits a SafetyEvent on a threshold transition
+                    ├── if no active override → applyFailsafe()
+                    │        EmergencyLanding → adapter.requestLand()
+                    │        RTHRequested     → adapter.requestRTH()
+                    │        MissionAbort     → adapter.abortMission()
+                    └── if an override exists → audit the suppression, do nothing
 ```
+
+### Command path
+
+An operator action travels the opposite way, and always through REST:
+
+```
+console ──HTTP POST /api/drone/rth──► authenticate ──► capability check
+                                                          │
+                                                          ├─ deny → audit + 403
+                                                          └─ allow → adapter.requestRTH()
+                                                                    │
+                                                                    └──► audit
+```
+
+Mission control is **not** accepted over the WebSocket. The socket is a
+read-only push channel; every action that changes state goes over REST where it
+can be authorised and audited per request. The server replies
+`unknown_message_type` to `MISSION_CONTROL`.
 
 ---
 
-## Requirements
+## 2. Layering
 
-- Node.js 18+
-- npm 9+
+```
+frontend/          browser console (plain JS, no build step)
+      │  HTTPS          WebSocket (read-only push)
+──────┼──────────────────────────────────────────────
+backend/           HTTP + WS server, auth, safety, missions, events
+      │
+drone/             DroneAdapter contract
+      │
+simulator/         a DroneAdapter that needs no hardware
+vision/            DetectionModel contract, camera interfaces
+```
+
+`DroneAdapter`, `DetectionModel`, `CameraSource`, `MissionStore` and
+`EventStore` are interfaces, and the services depend on the interfaces rather
+than the implementations. Swapping the simulator for a real MAVLink link does
+not touch the server, the safety engine, or the console.
 
 ---
 
-## Installation
+## 3. Authentication and authorisation
 
-```bash
-cd RescueEye
-npm install
+Three separate concerns:
+
+| Component | Question |
+|-----------|----------|
+| `AuthService` | Who is making this request? |
+| `Authorizer` | Are they allowed to do this? |
+| `AuditLog` | What did they do, and what happened? |
+
+- Tokens are `randomBytes(32)`, stored only as salted SHA-256.
+- Comparison is constant-time against every operator, with no early exit, so
+  neither the token nor which one matched is recoverable from timing.
+- No default-allow path: an unknown token is rejected, never treated as an
+  anonymous-but-permitted caller.
+- Denials are audited. Repeated 403s are the signal you want when someone is
+  probing.
+
+The WebSocket authenticates during the HTTP upgrade via `verifyClient`, so an
+unauthenticated socket never receives a byte of aircraft state.
+
+### Role capabilities
+
+Defined in `shared/models.ts`:
+
+```ts
+observer      mission:read
+operator      mission:read, mission:write, mission:control
+safetyOfficer mission:read, mission:write, mission:control,
+              drone:command, failsafe:override
+admin         config:write, account:manage
 ```
+
+`admin` deliberately does **not** inherit flight authority.
 
 ---
 
-## Development Setup
+## 4. Safety arbitration
 
-```bash
-# Build TypeScript
-npm run build
+`SafetyService` decides *what should happen*. `Authorizer` decides *whether a
+human may prevent it*. The server combines them:
 
-# Run in development mode (simulator)
-npm run dev
-
-# Run tests
-npm test
-
-# Run with coverage
-npm run test:coverage
 ```
+if override exists for this exact state and not expired:
+    audit the suppression
+    do not act
+else:
+    emit event, broadcast state, apply the failsafe
+```
+
+An override is granted only to `safetyOfficer`, requires a ≥10 character
+reason, is capped at 10 minutes, and applies to one state. Grants, uses and
+clears are all audited.
 
 ---
 
-## Simulator Mode
+## 5. Persistence
 
-RescueEye ships with a built-in simulator that requires no hardware.
+Append-only JSONL, one file per store, under `DATA_DIR`:
 
-The simulator provides realistic telemetry including:
-- Changing GPS coordinates
-- Altitude and heading
-- Battery consumption
-- Wind effects
-- GPS noise
-- Connection state changes
+| File | Contents |
+|------|----------|
+| `missions.jsonl` | Mission records |
+| `events.jsonl` | Event log (immutable) |
+| `detections.jsonl` | Detection history |
+| `audit.jsonl` | Reserved for audit persistence |
 
-To start in simulator mode:
-```bash
-npm run dev
-```
+Why JSONL: each record is written and flushed independently, so a crash
+mid-sortie truncates at most the final line rather than corrupting the file. On
+load a malformed line is skipped and counted (`corruptLines`, exposed on
+`/healthz`) instead of discarding the file.
 
-The simulator is the default mode. To connect to a real drone, configure
-a MAVLink or MAVSDK adapter instead.
-
-### Simulator API
-
-```bash
-# Set simulator waypoints
-curl -X POST http://localhost:8080/api/simulator/waypoints \
-  -H "Content-Type: application/json" \
-  -d '[{"lat":37.78,"lon":-122.42,"alt":60},{"lat":37.785,"lon":-122.41,"alt":70}]'
-
-# Configure simulator
-curl -X POST http://localhost:8080/api/simulator/config \
-  -H "Content-Type: application/json" \
-  -d '{"speedMps":10,"batteryCapacityPercent":80}'
-```
+The store interface is identical for the in-memory and on-disk variants, so
+tests exercise the same code path without touching the filesystem.
 
 ---
 
-## Camera Setup
+## 6. Vision
 
-The camera pipeline supports multiple sources:
-
-| Source    | Class              | Use Case                    |
-|-----------|--------------------|-----------------------------|
-| RTSP      | `RtspCameraSource` | Network cameras, drones     |
-| UDP       | (via RTSP)         | Video streams               |
-| Local     | `LocalCameraSource`| Webcam, built-in camera     |
-| USB       | (via Local)        | USB cameras                 |
-| Recorded  | (custom source)    | Prerecorded test footage    |
-
-The pipeline architecture:
 ```
-Camera Source → Decoder → Frame Buffer (bounded, drops old) → Vision Worker → Overlay → UI
+Frame ──► DetectionModel.detect(frame) ──► RawDetection[]
+                                              │
+                                        non-max suppression
+                                              │
+                                     Detection (tagged provenance)
 ```
+
+`DetectionModel` is an interface. `OnnxDetectionModel` takes an
+`InferenceRuntime`, supplied by the caller — this keeps the project from being
+welded to onnxruntime-web, node, or any vendor's acceleration path.
+
+An `OnnxDetectionModel` with no runtime **refuses to load** rather than silently
+returning nothing. A detector that quietly fails during a real search leaves an
+operator staring at an empty map.
+
+`SyntheticModel` is the demo generator. It is a `DetectionModel` so the pipeline
+can be exercised end to end, but everything it produces is `SYNTHETIC`, and the
+server refuses to present synthetic output as a real finding unless explicitly
+enabled.
 
 ---
 
-## Computer Vision Architecture
+## 7. Concurrency and backpressure
 
-The detection system is modular and model-agnostic:
-
-```
-Frame → DetectionModel.detect(frame) → Detection[]
-```
-
-- `DetectionModel` is an interface — swap models without changing the app
-- Default implementation uses ONNX-compatible architecture
-- Supports YOLOv8, NanoDet, or any ONNX-exported detector
-- Designed for edge-device performance
-- Bounded frame queue prevents memory growth
-- Async processing doesn't block telemetry or UI
-
-Detection output includes:
-- `id` — unique detection ID
-- `class` — detected object class (person, vehicle, building, debris, smoke, fire, water, etc.)
-- `confidence` — detection confidence (0-1)
-- `boundingBox` — position and size
-- `timestamp` — when detected
-- `frameId` — source frame
-- `sourceDroneId` — which drone detected it
-
-**Note:** Only generic human presence is detected. No facial recognition, identity, or biometric identification is implemented.
+| Concern | Approach |
+|---------|----------|
+| Telemetry rate | Adapter emits ~10 Hz; frames are values, not queued work. |
+| Frame buffer | Bounded ring; drops the oldest frame. A dropped frame is better than a stalled pipeline. |
+| Detection retention | Capped in `DetectionService` (default 500). |
+| Alert repetition | 30 s cooldown per type. |
+| Safety events | Emitted on transition, not per frame, with a 30 s cooldown. |
+| Event log | Capped in memory; unbounded on disk by design. |
+| Audit log | Capped at 10 000 entries. |
 
 ---
 
-## Real UAV Integration Architecture
+## 8. What is not implemented
 
-### Drone Adapter Layer
+Each item below is a real gap. The interfaces exist; the implementations do not.
 
-The `DroneAdapter` interface abstracts the autopilot implementation:
+### Real UAV link
 
-```typescript
-interface DroneAdapter {
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
-  getTelemetry(): Telemetry | null;
-  setFlightMode(mode: FlightMode): Promise<void>;
-  requestRTH(): Promise<void>;
-  requestLand(): Promise<void>;
-  // ...
-}
-```
+`MavlinkDroneAdapter` and `MavsdkDroneAdapter` satisfy the contract but their
+methods are placeholders — they do not open a socket or speak MAVLink. To
+implement:
 
-### Supported Protocols
+1. Open a UDP/TCP socket (MAVLink) or gRPC/WebSocket client (MAVSDK).
+2. Parse `HEARTBEAT` for state and `SYS_STATUS`/`BATTERY_STATUS` for power.
+3. Parse `GLOBAL_POSITION_INT` and `ATTITUDE` into `Telemetry`.
+4. Emit `GLOBAL_POSITION_INT` at ~10 Hz, respecting the requested stream rate.
+5. Send `SET_MODE`, `MISSION_ITEM_X_*` and `COMMAND_LONG` for commands.
+6. Track connection loss from heartbeat timeout, not from socket error alone —
+   a silently dead link often looks like an open socket.
 
-| Protocol    | Adapter                    | Autopilot Support     |
-|-------------|----------------------------|-----------------------|
-| MAVLink     | `MavlinkDroneAdapter`      | PX4, ArduPilot        |
-| MAVSDK      | `MavsdkDroneAdapter`       | Any MAVSDK-compatible |
-| Simulator   | `SimulatorDroneAdapter`    | N/A (simulation)      |
+`ConnectionManager` already provides reconnect with backoff; it needs a real
+adapter behind it.
 
-### Connecting a Real Drone
+### Camera pipeline
 
-1. Configure the adapter with your drone's connection parameters
-2. Use `DroneAdapterFactory` to create the appropriate adapter
-3. The rest of the application works identically for real and simulated drones
+`FrameBuffer` and the `CameraSource` interfaces exist. Missing: an RTSP client,
+a decoder (FFmpeg/GStreamer), and the wiring from frame to `DetectionModel`.
 
----
+### ONNX inference
 
-## Testing
+`OnnxDetectionModel` is ready for a runtime. Missing: the `InferenceRuntime`
+implementation, image preprocessing (resize/normalise), and a trained rescue
+detector. `decodeFlatOutput` and `nonMaxSuppression` are written and tested
+against synthetic tensors.
 
-```bash
-# Run all tests
-npm test
+### Search-area planning
 
-# Run specific test file
-npx jest tests/rescueeye.test.ts
+Waypoint planning is not implemented. The map draws the aircraft, home, track
+and detections. Missing: polygon drawing, lawnmower pattern generation,
+coverage percentage, per-waypoint progress, and battery-aware route estimates.
 
-# Watch mode
-npx jest --watch
-```
+### Hardware acceleration
 
-Test coverage includes:
-- Telemetry parsing and validation
-- Simulator telemetry generation
-- Mission state transitions (PLANNED → ACTIVE → COMPLETED/ABORTED)
-- Connection loss and reconnect behavior
-- Detection model output parsing
-- Event logging and filtering
-- Warning generation (low battery, GPS degraded, connection lost)
-- Safety state transitions
-- Frame buffer behavior (bounded queue, drop-oldest)
+No vendor binding, by intent. `InferenceRuntime` is the seam where
+onnxruntime-web with WebGPU, TensorRT, or OpenVINO would be introduced.
 
 ---
 
-## Production Considerations
+## 9. Deployment notes
 
-### Security
-- Use HTTPS/WSS in production
-- Authenticate WebSocket connections
-- Validate all API inputs
-- Rate-limit REST endpoints
-- Use environment variables for sensitive configuration
-
-### Performance
-- Telemetry: 10 Hz update rate
-- Vision: 10 Hz inference rate (async, non-blocking)
-- Camera: 20-30 FPS when hardware permits
-- Bounded frame buffer prevents memory growth
-- Old frames are dropped, never queued indefinitely
-
-### Deployment
-- Use PM2 or similar process manager for Node.js
-- Configure systemd service for auto-restart
-- Set up log rotation
-- Monitor system health via `/api/system/health`
-- Use reverse proxy (nginx) for WebSocket proxying
-
-### Hardware
-- Edge device with GPU acceleration recommended for CV inference
-- ONNX Runtime with CUDA/OpenVINO for hardware acceleration
-- Minimum 4GB RAM for vision processing
-- Network: low-latency link for real-time telemetry
-
----
-
-## Safety Boundary
-
-RescueEye is strictly a rescue, disaster-response, and situational-awareness platform.
-
-**Not implemented:**
-- Weapons or weapon control
-- Attack logic or autonomous engagement
-- Ammunition or explosive payload control
-- Human target selection
-- Facial recognition or person identification
-- Harmful collision behavior
-
-All computer vision functionality serves rescue, navigation, environmental awareness, or emergency response only.
-
----
-
-## License
-
-Apache License 2.0
+- Bind to `127.0.0.1` unless the network is trusted; use TLS and reverse-proxy
+  WebSocket if exposing beyond localhost.
+- Provision operator accounts out of band for real use; the startup banner is a
+  development convenience.
+- `DATA_DIR` should be on durable storage. The event log is the flight record.
+- Run under a process supervisor (systemd, PM2) with log rotation.
+- `ALLOW_SYNTHETIC` should stay unset outside demos.
