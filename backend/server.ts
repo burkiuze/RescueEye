@@ -33,6 +33,11 @@ import { EventService } from "./event_service";
 import { SafetyService, type SafetyEvent } from "./safety_service";
 import { AuthService, AuditLog, Authorizer, parseBearer } from "./auth_service";
 import { JsonlStore, MemoryStore, type AnyStore } from "./persistence";
+import {
+  SystemHealthManager,
+  type HealthStatus,
+  type SubsystemHealth,
+} from "./health_manager";
 
 import type { DroneAdapter } from "../shared/models";
 import { ROLE_CAPABILITIES as ROLE_CAPS } from "../shared/models";
@@ -103,10 +108,13 @@ export class RescueEyeServer {
 
   private readonly clients = new Set<WebSocket>();
   private readonly clientOperators = new WeakMap<WebSocket, Operator>();
+  private readonly healthManager = new SystemHealthManager();
 
   private readonly startedAt = Date.now();
   private listenResolve: (() => void) | null = null;
   private boundPort = 0;
+  /** Counts evaluations that threw. A non-zero value means safety is blind. */
+  private safetyEngineFaults = 0;
 
   constructor(private readonly config: ServerConfig) {
     this.auth = config.auth ?? new AuthService();
@@ -208,12 +216,39 @@ export class RescueEyeServer {
     });
   }
 
-  /**
+/**
    * Evaluate safety on every frame and apply the resulting failsafe unless a
    * human has an active, unexpired override for that state.
+   *
+   * Wrapped deliberately. This runs synchronously inside the adapter's
+   * telemetry callback, so an uncaught throw here would propagate into the
+   * adapter's interval and take the safety engine down for the rest of the
+   * process — the aircraft would keep flying with no monitoring at all. A
+   * failing evaluator must not be able to stop the evaluator.
    */
-  private onSafetyFrame(t: Telemetry): void {
-    const events = this.safetyService.evaluate(t);
+private onSafetyFrame(t: Telemetry): void {
+    let events: SafetyEvent[];
+    try {
+      events = this.safetyService.evaluate(t);
+    } catch (err) {
+      this.safetyEngineFaults++;
+      this.audit.record({
+        actorId: "system:safety",
+        actorUsername: "safety-service",
+        actorRole: "admin",
+        action: "safety.evaluate.failed",
+        target: "SafetyService",
+        outcome: "failed",
+        detail: { error: String(err) },
+      });
+      this.broadcast({
+        type: "SAFETY_ENGINE_FAULT",
+        payload: { error: String(err), telemetryTimestamp: t.timestamp },
+        timestamp: Date.now(),
+        source: "server",
+      });
+      return;
+    }
     for (const evt of events) {
       this.onSafetyEvent(evt);
     }
@@ -906,6 +941,13 @@ export class RescueEyeServer {
   // ── Health ───────────────────────────────────────────────────────────
 
   health(): SystemHealth & {
+    /** Worst subsystem verdict. Never "ok" when something is unmeasured. */
+    overall: HealthStatus;
+    subsystems: SubsystemHealth[];
+    unknownCount: number;
+    safetyEngineFaults: number;
+    persistenceDegraded: boolean;
+    persistenceWriteFailures: number;
     status: string;
     missions: number;
     events: number;
@@ -919,13 +961,53 @@ export class RescueEyeServer {
   } {
     const mem = process.memoryUsage();
     const t = this.telemetryService.getTelemetry();
+    const telemetryLatencyMs = t ? Math.max(0, Date.now() - t.timestamp) : -1;
+
+    const writeFailures =
+      this.missions.writeFailures +
+      this.events.writeFailures +
+      this.detections.writeFailures;
+    const persistenceDegraded =
+      this.missions.degraded || this.events.degraded || this.detections.degraded;
+
+    // Fold every subsystem into one verdict. Previously this method returned a
+    // literal "ok" regardless of reality, which meant a console could report a
+    // healthy system while the safety engine was throwing on every frame.
+    const snapshot = this.healthManager.evaluate({
+      droneConnectionState: t?.connectionState,
+      telemetryLatencyMs: t ? telemetryLatencyMs : null,
+      gpsFix: t?.gpsFix,
+      satelliteCount: t?.satelliteCount,
+      // No camera source is wired to the server yet. Passing undefined keeps
+      // this UNKNOWN rather than falsely NOMINAL.
+      cameraActive: undefined,
+      visionModelLoaded: undefined,
+      batteryPercent: t?.batteryPercentage,
+      missionStoreSize: this.missions.size,
+      safetyEngineRunning: true,
+      safetyEngineFaults: this.safetyEngineFaults,
+      persistenceDegraded,
+      persistenceWriteFailures: writeFailures,
+      persistenceCorruptLines:
+        this.missions.corruptLines + this.events.corruptLines + this.detections.corruptLines,
+      backendUptimeSeconds: (Date.now() - this.startedAt) / 1000,
+    });
+
     return {
-      status: "ok",
+      // Kept for compatibility with existing probes, but now derived rather
+      // than hardcoded.
+      status: snapshot.overall === "NOMINAL" ? "ok" : snapshot.overall.toLowerCase(),
+      overall: snapshot.overall,
+      subsystems: snapshot.subsystems,
+      unknownCount: snapshot.unknownCount,
+      safetyEngineFaults: this.safetyEngineFaults,
+      persistenceDegraded,
+      persistenceWriteFailures: writeFailures,
       cpuPercent: 0, // Meaningful CPU accounting needs a native sampler; not faked.
       memoryMB: Math.round(mem.rss / (1024 * 1024)),
       visionInferenceMs: 0,
       videoFPS: 0,
-      telemetryLatencyMs: t ? Math.max(0, Date.now() - t.timestamp) : -1,
+      telemetryLatencyMs,
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
       missions: this.missions.size,
       events: this.events.size,
@@ -933,6 +1015,8 @@ export class RescueEyeServer {
       auditEntries: this.audit.size,
       corruptLines:
         this.missions.corruptLines + this.events.corruptLines + this.detections.corruptLines,
+      // Named for what it counts. The previous `connectedOperators` was the
+      // WebSocket count, duplicated by wsClients.
       connectedOperators: this.clients.size,
       activeOverrides: this.authorizer.listOverrides().length,
       safetyState: this.safetyService.getCurrentState(),

@@ -325,6 +325,8 @@ export interface SimulatorConfig {
   startLatitude: number;
   startLongitude: number;
   startAltitude: number;
+  /** Ground elevation in metres. Landing terminates here. Defaults to 0. */
+  groundElevation: number;
   speedMps: number;
   headingDegrees: number;
   batteryCapacityPercent: number;

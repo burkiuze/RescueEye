@@ -194,7 +194,7 @@ graph TB
     DSS["Detection Service<br/>recordDetection<br/>IMPLEMENTED"]
     PLS["Persistence Layer<br/>IMPLEMENTED"]
     DCG["Drone Command Gateway<br/>REST only<br/>IMPLEMENTED"]
-    SHM["System Health Endpoint<br/>IMPLEMENTED"]
+    SHM["System Health Endpoint<br/>derived verdict<br/>IMPLEMENTED"]
     DTO["Detection Provenance Gate<br/>IMPLEMENTED"]
   end
 
@@ -222,7 +222,7 @@ graph TB
 
   subgraph SH["SYSTEM HEALTH"]
     direction TB
-    SHMGR["System Health Manager<br/>health() aggregate<br/>PARTIAL"]
+    SHMGR["System Health Manager<br/>worst-of aggregation<br/>IMPLEMENTED"]
     DCH["Drone Connection Health<br/>IMPLEMENTED"]
     CMH["Camera Health<br/>PLANNED"]
     VMH["Vision Model Health<br/>PARTIAL"]
@@ -233,7 +233,7 @@ graph TB
     BEH["Backend Health<br/>IMPLEMENTED"]
     MIH["Mission Health<br/>PLANNED"]
     SEH["Safety Engine Health<br/>PARTIAL"]
-    AGG["Aggregate NOMINAL / DEGRADED /<br/>CRITICAL / OFFLINE<br/>PARTIAL"]
+    AGG["Aggregate NOMINAL / DEGRADED /<br/>CRITICAL / OFFLINE / UNKNOWN<br/>IMPLEMENTED<br/>UNKNOWN never folded to NOMINAL"]
   end
 
   subgraph DT["DIGITAL TWIN / SIMULATOR"]
@@ -242,15 +242,16 @@ graph TB
     AST["Aircraft State<br/>IMPLEMENTED"]
     PMD["Position Model<br/>ground track<br/>IMPLEMENTED"]
     HMD["Heading Model<br/>bearing to target<br/>IMPLEMENTED"]
-    ALM["Altitude Model<br/>PARTIAL"]
+    ALM["Altitude Model<br/>vertical motion + ground<br/>IMPLEMENTED"]
     BMD["Battery Model<br/>~20 min pack<br/>IMPLEMENTED"]
     WMD["Wind Model<br/>push + turbulence<br/>IMPLEMENTED"]
     GNM["GPS Noise Model<br/>IMPLEMENTED"]
     CLM["Connection Loss Model<br/>random dropout<br/>IMPLEMENTED"]
-    RTB["RTH Behaviour<br/>steers to home<br/>PARTIAL"]
-    LDB["Landing Behaviour<br/>descend<br/>PARTIAL"]
+    RTB["RTH Behaviour<br/>steers to home,<br/>terminates on arrival<br/>IMPLEMENTED"]
+    LDB["Landing Behaviour<br/>descends to ground,<br/>terminates<br/>IMPLEMENTED"]
     SDG["Synthetic Detection Generator<br/>SyntheticModel<br/>IMPLEMENTED"]
     SCM["Scenario Manager<br/>PLANNED"]
+    FIN["Fault Injection API<br/>battery / GPS / link /<br/>stale-clock<br/>IMPLEMENTED"]
     SEVT["Simulation Events<br/>PLANNED"]
     SMR["Simulation Metrics<br/>PLANNED"]
   end
@@ -491,8 +492,8 @@ graph TB
   TBS --> MDB
 
   %% ── classify ──
-  class PUB,TLM,VAL,STP,FBUF,CFIL,NMS,PROV,DEC,MSMS,MPR,MVAL,MAB,RTH,EMG,ABT,WRN,FAM,HBM,CCH,TCH,MSS,TSV,DSS,DCG,SHM,DST,AUL,TMO,BMON,CBM,CNM,GPM,TTM,MSM,CST,DAI,SIMA,TRV,TVA,TST,TBS,HTTPS,WSS,RTR,ELS,PLS,EVS,MEV,SEV2,AUE,SHMGR,DCH,TMH,BAH,PHH,BEH,VMH,SEH,AGG,AST,PMD,HMD,BMD,WMD,GNM,CLM,SDG,AUTHM,AUTHZ,GCON,RQST,CVL,DENY,ALW implemented
-  class FMS,PWR,CSRC,ALM,RTB,LDB,GFM,WDM,CFM,RCM,MSGV,CMDR,AUTHZ,DRV,AUTC,MDB,LMAP,APOS,FTRK,DTO2,TPN,BPN,GPL,MPRG,SAL,DRV,ETL,SHV,OCTL,SCTL,ARV,FRP,CLM,GNM partial
+  class PUB,TLM,VAL,STP,FBUF,CFIL,NMS,PROV,DEC,MSMS,MPR,MVAL,MAB,RTH,EMG,ABT,WRN,FAM,HBM,CCH,TCH,MSS,TSV,DSS,DCG,SHM,DST,AUL,TMO,BMON,CBM,CNM,GPM,TTM,MSM,CST,DAI,SIMA,TRV,TVA,TST,TBS,HTTPS,WSS,RTR,ELS,PLS,EVS,MEV,SEV2,AUE,SHMGR,DCH,TMH,BAH,PHH,BEH,VMH,SEH,AGG,AST,PMD,HMD,BMD,WMD,GNM,CLM,SDG,ALM,RTB,LDB,FIN,AGG,AUTHM,AUTHZ,GCON,RQST,CVL,DENY,ALW implemented
+  class FMS,PWR,CSRC,GFM,WDM,CFM,RCM,MSGV,CMDR,AUTC,MDB,LMAP,APOS,FTRK,DTO2,TPN,BPN,GPL,MPRG,SAL,DRV,ETL,SHV,OCTL,SCTL,ARV,FRP partial
   class FC,NSM,PSM,ASM,CMD,VHL,CAM,THM,SNS,GNSS,IMU,BARO,COMP,BAT,LNK,CAMR,THMR,SHL,FACA,FVAL,PRE,IRT,DMOD,DVAL,GEO,DEDUP,DHIS,DSRV,OVQ,MMGR,SAM,SPOL,CPL,WPL,CTP,RGE,BES,MCE,CST,HBMON,TPAR,CAD,AHL,MAVA,MSKA,CMH,NMH,MIH,SCM,SEVT,SMR,SAO,WPO,CFE,OVRQ planned
   class SEV,TTD,FDE,SAR,DCM,SOA,CAP,RSN,EXP,SCP,OVL,ARG safety
   class AUL,PES security
@@ -1189,10 +1190,10 @@ Every component in the master diagram, with the file that implements it.
 | Safety Arbitration | Override vs action | `SafetyEvent` | act / suppress | `backend/server.ts` | `[IMPLEMENTED]` |
 | Event Service | Filterable event log | `MissionEvent` | query results | `backend/event_service.ts` | `[IMPLEMENTED]` |
 | Detection Recorder | Provenance gate + persist | `Detection` | stored detection | `backend/server.ts` | `[IMPLEMENTED]` |
-| Persistence Layer | JSONL stores, crash recovery | records | reloaded state | `backend/persistence.ts` | `[IMPLEMENTED]` |
+| Persistence Layer | JSONL stores, crash recovery, write-failure reporting | records | reloaded state | `backend/persistence.ts` | `[IMPLEMENTED]` |
 | Drone Command Gateway | REST-only command path | authorised command | adapter call | `backend/server.ts` | `[IMPLEMENTED]` |
-| System Health Endpoint | Live counters | process state | health JSON | `backend/server.ts` | `[PARTIAL]` |
-| System Health Manager | Aggregate NOMINAL/DEGRADED/CRITICAL | subsystem health | one verdict | — | `[PLANNED]` |
+| System Health Endpoint | Derived health verdict + live counters | process state | health JSON | `backend/server.ts` | `[IMPLEMENTED]` |
+| System Health Manager | Aggregate NOMINAL/DEGRADED/CRITICAL/OFFLINE/UNKNOWN | subsystem health | worst-of verdict | `backend/health_manager.ts` | `[IMPLEMENTED]` |
 | Mission Manager (service) | Store-injected mission logic | mission command | mission record | `backend/mission_service.ts` | `[UNWIRED]` |
 | Coverage Planner | Lawnmower pattern over a polygon | polygon + altitude | waypoints | — | `[PLANNED]` |
 | Waypoint Planner | Route generation | polygon | waypoints | — | `[PLANNED]` |
@@ -1359,7 +1360,233 @@ flowchart LR
 
 ---
 
-## 14. Security Boundary
+## 14. Failure & Recovery Architecture
+
+A rescue console is used when something is going wrong. The nominal flow is the
+easy half; what matters is what happens when a subsystem fails mid-sortie.
+
+Every failure below follows the same chain:
+
+```
+detect → classify → notify → safe fallback → log
+```
+
+```mermaid
+flowchart TB
+  subgraph DET["1 — DETECT"]
+    D1["Stale telemetry frame"]
+    D2["connectionState = LOST"]
+    D3["batteryPercent below threshold"]
+    D4["gpsFix false / satellites low"]
+    D5["SafetyService.evaluate throws"]
+    D6["store write error"]
+    D7["camera source absent"]
+    D8["adapter.connect throws"]
+  end
+
+  subgraph CL["2 — CLASSIFY"]
+    C1["SafetyState<br/>TELEMETRY_TIMEOUT"]
+    C2["SafetyState<br/>CONNECTION_LOST"]
+    C3["SafetyState<br/>LOW / CRITICAL_BATTERY"]
+    C4["SafetyState<br/>GPS_DEGRADED"]
+    C5["fault counter > 0"]
+    C6["health = CRITICAL"]
+    C7["health = UNKNOWN"]
+    C8["server.start rejects"]
+  end
+
+  subgraph NOT["3 — NOTIFY"]
+    N1["EVENT over WebSocket"]
+    N2["AuditLog entry"]
+    N3["Health snapshot"]
+    N4["console banner"]
+  end
+
+  subgraph FB["4 — SAFE FALLBACK"]
+    F1["MISSION_ABORT<br/>stop the sortie"]
+    F2["RTH / emergency landing"]
+    F3["Continue, operator warned"]
+    F4["Evaluate anyway;<br/>record the fault"]
+    F5["Degrade to in-memory;<br/>keep serving reads"]
+    F6["Report UNKNOWN,<br/>never assume healthy"]
+    F7["start() rejects →<br/>process exits non-zero"]
+  end
+
+  subgraph LG["5 — LOG"]
+    L1["events.jsonl<br/>append-only"]
+    L2["audit (in-memory)"]
+    L3["health endpoint"]
+    L4["persistenceWriteFailures counter"]
+  end
+
+  D1 --> C1 --> F1
+  D2 --> C2 --> F1
+  D3 --> C3 --> F2
+  D4 --> C4 --> F3
+  D5 --> C5 --> F4
+  D6 --> C6 --> F5
+  D7 --> C7 --> F6
+  D8 --> C8 --> F7
+
+  C1 --> N1 --> L1
+  C2 --> N1
+  C3 --> N1
+  C5 --> N2 --> L2
+  C6 --> N3 --> L3
+  C6 --> N2
+  F5 --> L4 --> N3
+
+  style D5,C5,F4 safety
+  style C7,F6,L3 safety
+  style F7 safety
+  style N1,N2,N3 implemented
+  style F1,F2,F3 implemented
+  style F5 implemented
+```
+
+### Failure matrix
+
+| Failure | Detected by | Classification | Fallback | Logged | Status |
+|---------|-------------|----------------|----------|--------|--------|
+| Telemetry stops | Frame age vs `telemetryTimeoutMs` | `TELEMETRY_TIMEOUT` | `MISSION_ABORT` | event + audit | `[IMPLEMENTED]` |
+| Link lost | `connectionState !== CONNECTED` | `CONNECTION_LOST` | `MISSION_ABORT` | event + audit | `[IMPLEMENTED]` |
+| Low battery | `batteryPercent <= 20` | `LOW_BATTERY_WARNING` | `RTH_REQUESTED` | event + audit | `[IMPLEMENTED]` |
+| Critical battery | `batteryPercent <= 5` | `CRITICAL_BATTERY` | `EMERGENCY_LANDING` | event + audit | `[IMPLEMENTED]` |
+| GPS degraded | `!gpsFix` or `satellites < 4` | `GPS_DEGRADED` | warning only | event | `[IMPLEMENTED]` |
+| Geofence breach | `distanceFromHome > 5000 m` | `GEOFENCE_WARNING` | **warning only — does not prevent** | event | `[PARTIAL]` |
+| High wind | `groundSpeed > 15 m/s` | `HIGH_WIND_WARNING` | warning only (ground speed is a proxy) | event | `[PARTIAL]` |
+| Safety engine throws | `try/catch` around `evaluate()` | fault counter | keep evaluating; surface as CRITICAL | audit + `SAFETY_ENGINE_FAULT` | `[IMPLEMENTED]` |
+| Store write fails | `stream.on("error")` / `write` throw | `writeFailures` | degrade to in-memory; keep serving reads | health `CRITICAL` | `[IMPLEMENTED]` |
+| Unwritable `DATA_DIR` | `mkdirSync` in constructor throws | `degradedReason` | fall back to memory instead of crashing at boot | health `CRITICAL` | `[IMPLEMENTED]` |
+| Camera absent | `cameraActive === undefined` | health `UNKNOWN` | report UNKNOWN, never NOMINAL | health snapshot | `[IMPLEMENTED]` |
+| Vision model absent | `visionModelLoaded === undefined` | health `UNKNOWN` | report UNKNOWN | health snapshot | `[IMPLEMENTED]` |
+| Adapter connect fails | `await adapter.connect()` in `start()` | start rejects | process exits non-zero; no half-open console | stderr | `[IMPLEMENTED]` |
+| Camera lost mid-stream | — | — | **no detector** | — | `[PLANNED]` |
+| Vision runtime crash | — | — | **no detector** | — | `[PLANNED]` |
+| Mission geometry invalid | — | name/length checks only | **no geometry validation** | — | `[PLANNED]` |
+
+### Failures with no detector
+
+Stated plainly, because these are the gaps that would matter in service:
+
+- **Camera lost mid-stream.** No camera is wired to the server, so there is
+  nothing to detect the loss of. When one is added it needs its own watchdog;
+  the camera sources in `vision/` currently report a resolution and `fps: 30`
+  unconditionally, including while nothing is connected.
+- **Vision inference crash.** The inference path is not wired to the server, so
+  there is no process to supervise.
+- **Invalid mission geometry.** Mission creation validates the name and
+  description only. No polygon, altitude or battery-feasibility check exists,
+  because no planner exists.
+
+---
+
+## 15. System Health & Single Points of Failure
+
+### Health aggregation
+
+`backend/health_manager.ts` folds ten subsystems into one verdict.
+
+| Status | Meaning |
+|--------|---------|
+| `NOMINAL` | Measured, and within limits. |
+| `UNKNOWN` | Not measured. **Never treated as nominal.** |
+| `DEGRADED` | Measured, impaired but usable. |
+| `CRITICAL` | Measured, unsafe or losing data. |
+| `OFFLINE` | Measured, not functioning. |
+
+Worst-wins ordering: `OFFLINE > CRITICAL > DEGRADED > UNKNOWN > NOMINAL`.
+
+`UNKNOWN` sits **below** `DEGRADED` deliberately. An unmeasured subsystem is a
+problem to resolve; one measured and found impaired is more urgent.
+
+In the shipped configuration the console reports `UNKNOWN`, because no camera
+source and no vision model are wired. That is the honest verdict, and it is
+what `/healthz` returns. It is not a bug.
+
+### Single points of failure
+
+| SPOF | Consequence | Current mitigation | Status |
+|------|-------------|--------------------|--------|
+| **Single Node process** | Crash loses all console state and the audit log | none — no clustering, no supervisor | `[PARTIAL]` |
+| **Audit log is in-memory** | Restart erases who-did-what | none — not written to disk | `[PLANNED]` |
+| **No persistence retry** | A transient write failure drops a record permanently | counter surfaces it; no retry | `[PARTIAL]` |
+| **Safety engine runs in-process** | If the process dies, the failsafe stops with it | adapter continues its own failsafe only if the real adapter implements one — the simulator does not | `[PARTIAL]` |
+| **`TelemetryService` and `SafetyService` share a process** | A hang in one stalls both | telemetry dispatch is synchronous and unguarded between the two | `[PARTIAL]` |
+| **No watchdog restarts the console** | A crash ends the session silently | process supervisor is a deployment concern | `[PLANNED]` |
+| **Single safety officer can suppress a failsafe** | One person can overrule automation | reason required, time-boxed, audited | `[IMPLEMENTED]` |
+
+**The most important line in this table:** the safety engine has no process
+isolation. It is a function call inside the same event loop as everything else.
+A blocking call anywhere on that loop stalls the failsafe. `onSafetyFrame` is
+wrapped against *throwing*, but not against *blocking*.
+
+---
+
+## 16. Validation Status
+
+No claim of flight-readiness is made. Real aircraft use requires, at minimum:
+simulation, then HIL/SIL against the real autopilot, then field trials, and
+independent verification by a qualified engineer.
+
+### Verified by test
+
+| Requirement | Test |
+|-------------|------|
+| Failsafe fires on critical battery | `unit.test.ts` — "critical battery demands an immediate action" |
+| Failsafe fires on link loss | `unit.test.ts` — "lost connection is critical and produces a dispatchable action" |
+| Failsafe fires on stale telemetry | `unit.test.ts` — "stale telemetry raises TELEMETRY_TIMEOUT" |
+| A held condition does not flood the log | `unit.test.ts` — "a held condition does not re-emit on every frame" |
+| A transition is never swallowed | `unit.test.ts` — "a genuine transition is never swallowed by the repeat cooldown" |
+| Anonymous WebSocket refused | `integration.test.ts` — "an unauthenticated socket is refused during the handshake" |
+| Role separation enforced server-side | `integration.test.ts` — authorisation suite |
+| Admin cannot fly | `integration.test.ts` — "an admin does not inherit flight authority" |
+| Override requires reason and role | `integration.test.ts` — failsafe override suite |
+| Illegal mission transition rejected | `integration.test.ts` — "an illegal transition is refused with 409" |
+| Audit survives restart | `integration.test.ts` — "missions and events survive a restart" |
+| Synthetic detections never masquerade | `unit.test.ts`, `integration.test.ts` — provenance suites |
+| UNKNOWN is not NOMINAL | `health.test.ts` — full suite |
+| RTH terminates at home | `unit.test.ts` — "RTH terminates on arrival at home" |
+| Landing terminates at ground | `unit.test.ts` — "landing terminates at ground level" |
+| Failure conditions are provokable | `unit.test.ts` — "simulator fault injection" |
+
+### Unverified assumptions
+
+These are believed but **not proven**. Each is a place where the architecture
+could be wrong in a way tests would not catch.
+
+| Assumption | Why it is unverified | How to verify |
+|------------|----------------------|---------------|
+| A real autopilot honours `requestRTH()` / `requestLand()` | No MAVLink transport exists to send them | HIL against PX4 / ArduPilot |
+| Battery percentage maps to real endurance | The drain model is a linear constant | Bench discharge curve |
+| 30 s repeat cooldown suits real flight | Chosen by judgement, not measurement | Flight trials |
+| Threshold values (20 %, 5 %, 5000 m, 15 m/s) are appropriate | Defaults, not derived from an SOP | Mission risk assessment |
+| Geofence as a warning is sufficient | It does not prevent anything | Risk assessment; likely needs enforcement |
+| Ground speed is an acceptable wind proxy | It is not a wind measurement | Add a real wind sensor |
+| Constant-time token comparison resists timing attack | Correct construction, never attacked | External security review |
+| Node's event loop stays responsive under load | Untested under real telemetry volume | Load test at target frame rate |
+| `JSONL` survives power loss mid-write | Designed for it; never power-cycled | Kill -9 during a write, then read |
+| The audit log being in-memory is acceptable | A convenience decision | Product and compliance decision |
+
+### Recommended next validation steps
+
+1. **Scenario tests in the digital twin.** The fault-injection API added in
+   this round (`setBattery`, `setGpsQuality`, `dropLink`,
+   `freezeTelemetryTimestamp`) exists so every safety rule can be provoked
+   deliberately. Write one scenario per safety rule.
+2. **Replay.** Persist telemetry at full rate, then re-run a sortie through the
+   safety engine and assert the same actions. Currently the event log records
+   decisions, not the inputs.
+3. **HIL.** Connect a real autopilot over MAVLink and repeat the safety suite
+   against it. The safety logic is transport-agnostic; the transport is the
+   unproven part.
+4. **Independent safety review** of `SafetyService` and `Authorizer` by someone
+   who did not write them.
+5. **Persistence durability test** — power-loss simulation, not clean shutdown.
+
+---
+
+## 17. Security Boundary
 
 RescueEye is a rescue, disaster-response and situational-awareness platform.
 
@@ -1377,7 +1604,7 @@ finding. A human decides what to act on.
 
 ---
 
-## 15. Deployment Notes
+## 18. Deployment Notes
 
 - Bind `127.0.0.1` unless the network is trusted; terminate TLS and proxy the
   WebSocket if exposed beyond localhost.
@@ -1386,3 +1613,6 @@ finding. A human decides what to act on.
 - `DATA_DIR` should be durable storage — the event log is the flight record.
 - `ALLOW_SYNTHETIC` must stay unset outside demos.
 - Audit log is in-memory only. Export it if it must survive a restart.
+- Run under a supervisor. A single process is a single point of failure (§15).
+- `/healthz` returns `UNKNOWN` in the shipped configuration. That is correct
+  behaviour, not a fault — see §15.

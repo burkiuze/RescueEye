@@ -8,6 +8,7 @@ const DEFAULT_CONFIG: SimulatorConfig = {
   startLatitude: 37.7749,
   startLongitude: -122.4194,
   startAltitude: 50,
+  groundElevation: 0,
   speedMps: 5,
   headingDegrees: 90,
   batteryCapacityPercent: 100,
@@ -17,6 +18,9 @@ const DEFAULT_CONFIG: SimulatorConfig = {
   windSpeedMps: 3,
   windDirectionDegrees: 180,
 };
+
+/** Distance from home at which an RTH is considered complete. */
+const RTH_ARRIVAL_RADIUS_M = 12;
 
 export class SimulatorDroneAdapter implements DroneAdapter {
   readonly droneId: string;
@@ -45,6 +49,16 @@ export class SimulatorDroneAdapter implements DroneAdapter {
   private _isPaused: boolean = false;
   private _isAborted: boolean = false;
   private _flightMode: FlightMode = "AUTO";
+  /** Set by requestRTH; cleared on arrival at home. */
+  private _rthActive = false;
+  /** True once the aircraft has touched down. Cleared on take-off. */
+  private _landed = false;
+  /** Ground elevation used for landing termination. */
+  private readonly groundElevation: number;
+  /** Fault injection overrides. */
+  private _forcedGpsFix: boolean | null = null;
+  private _forcedSatellites: number | null = null;
+  private _frozenTimestamp: number | null = null;
 
   constructor(droneId: string, config?: Partial<SimulatorConfig>) {
     this.droneId = droneId;
@@ -57,6 +71,10 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this._currentSpeed = this.config.speedMps;
     this._commandedSpeed = this.config.speedMps;
     this._currentVSpeed = 0;
+    // Ground sits below the aircraft. Setting this equal to startAltitude made
+    // every aircraft look like it had already landed on the very first tick,
+    // which froze the simulator completely.
+    this.groundElevation = this.config.groundElevation;
   }
 
   get connectionState(): ConnectionState {
@@ -106,6 +124,8 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this._currentHeading = toHome;
     this._commandedVspeed = 1.5; // gentle climb while returning
     this._flightMode = "RTL";
+    this._rthActive = true;
+    this._landed = false;
   }
 
   async requestLand(): Promise<void> {
@@ -114,6 +134,7 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this._waypointIndex = 0;
     this._commandedVspeed = -1.5; // descend
     this._flightMode = "LAND";
+    this._landed = false;
   }
 
   async pauseMission(): Promise<void> {
@@ -160,6 +181,54 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this.config.windDirectionDegrees = directionDegrees;
   }
 
+  // ── Fault injection ───────────────────────────────────────────────────
+  //
+  // Every safety rule in SafetyService is only as trustworthy as the ability
+  // to provoke the condition it watches for. Without these knobs, "low battery
+  // triggers RTH" is an assertion nobody can actually test.
+
+  /** Force the battery to a level, bypassing the drain model. */
+  setBattery(percent: number): void {
+    this._currentBattery = Math.max(0, Math.min(100, percent));
+  }
+
+  /** Force GPS quality, to exercise the GPS health monitor. */
+  setGpsQuality(fix: boolean, satellites: number): void {
+    this._forcedGpsFix = fix;
+    this._forcedSatellites = satellites;
+  }
+
+  /** Drop the link deterministically instead of waiting for a random dropout. */
+  dropLink(): void {
+    if (this._connectionState === "CONNECTED") this._setState("LOST");
+  }
+
+  /** Bring the link back. */
+  restoreLink(): void {
+    if (this._connectionState === "LOST") this._setState("CONNECTED");
+  }
+
+  /**
+   * Stop advancing the timestamp on emitted frames.
+   *
+   * This is the fault the telemetry-timeout monitor watches for: frames keep
+   * arriving, they are just old. Simulating it by pausing the stream would not
+   * exercise the same code path.
+   */
+  freezeTelemetryTimestamp(): void {
+    this._frozenTimestamp = Date.now();
+  }
+
+  /** Resume real timestamps. */
+  unfreezeTelemetryTimestamp(): void {
+    this._frozenTimestamp = null;
+  }
+
+  /** Whether the aircraft has completed a landing. */
+  get hasLanded(): boolean {
+    return this._landed;
+  }
+
   // ── Private ──────────────────────────────────────────────────────────
 
   private _setState(state: ConnectionState): void {
@@ -198,6 +267,37 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     const dt = 0.1; // 100ms step
     this._simElapsed += dt;
     this._flightDuration = this._simElapsed;
+
+    // Termination checks first. Both RTH and landing previously ran forever:
+    // the aircraft flew over home still climbing, and a landing descent went
+    // below zero indefinitely. A failsafe you cannot observe finishing is a
+    // failsafe you cannot verify.
+    if (this._rthActive && this._distanceFromHome <= RTH_ARRIVAL_RADIUS_M) {
+      this._rthActive = false;
+      this._commandedSpeed = 0;
+      this._currentSpeed = 0;
+      this._commandedVspeed = -1.5;
+      this._flightMode = "LAND";
+    }
+
+    if (this._currentAlt <= this.groundElevation) {
+      // Touchdown.
+      this._currentAlt = this.groundElevation;
+      this._currentVSpeed = 0;
+      this._commandedVspeed = 0;
+      this._currentSpeed = 0;
+      this._commandedSpeed = 0;
+      if (!this._landed) {
+        this._landed = true;
+        this._flightMode = "LAND";
+      }
+      // Still update the clock and battery-free bookkeeping below.
+      this._distanceFromHome = this._distanceTo(
+        this.config.startLatitude,
+        this.config.startLongitude,
+      );
+      return;
+    }
 
     // Move toward next waypoint or continue in current heading
     if (this._waypoints.length > 0 && this._waypointIndex < this._waypoints.length) {
@@ -259,14 +359,32 @@ export class SimulatorDroneAdapter implements DroneAdapter {
     this._currentVSpeed += (this._commandedVspeed - this._currentVSpeed) * 0.1;
     this._currentVSpeed += (Math.random() - 0.5) * 0.05;
 
+    // Vertical motion is independent of the horizontal path. Without this,
+    // commanded vertical speed was reported in telemetry but never moved the
+    // aircraft: RTH climbed on paper only, and a landing never descended at
+    // all, so neither failsafe could be observed to finish.
+    this._currentAlt = Math.max(
+      this.groundElevation,
+      this._currentAlt + this._currentVSpeed * dt,
+    );
+
     // Speed also settles toward the commanded value rather than drifting.
     this._currentSpeed += (this._commandedSpeed - this._currentSpeed) * 0.1;
     this._currentSpeed = Math.max(0, this._currentSpeed);
 
     // Distance from home (metres), accounting for longitude convergence.
-    const dLat = (this._currentLat - this.config.startLatitude) * 111320;
-    const dLon = (this._currentLon - this.config.startLongitude) * 111320 * Math.cos((this._currentLat * Math.PI) / 180);
-    this._distanceFromHome = Math.sqrt(dLat * dLat + dLon * dLon);
+    this._distanceFromHome = this._distanceTo(
+      this.config.startLatitude,
+      this.config.startLongitude,
+    );
+  }
+
+  /** Great-circle-ish distance in metres, longitude-corrected. */
+  private _distanceTo(lat: number, lon: number): number {
+    const dLat = (this._currentLat - lat) * 111320;
+    const dLon =
+      (this._currentLon - lon) * 111320 * Math.cos((this._currentLat * Math.PI) / 180);
+    return Math.sqrt(dLat * dLat + dLon * dLon);
   }
 
   private _buildTelemetry(): Telemetry {
@@ -284,8 +402,10 @@ export class SimulatorDroneAdapter implements DroneAdapter {
       yaw: this._currentHeading,
       batteryPercentage: this._currentBattery,
       voltage: 12.6 * (this._currentBattery / 100),
-      gpsFix: this._connectionState === "CONNECTED",
-      satelliteCount: 8 + Math.floor(Math.random() * 8),
+      // Fault injection overrides the modelled values when set, so a safety
+      // monitor can be exercised without waiting for an unlikely condition.
+      gpsFix: this._forcedGpsFix ?? this._connectionState === "CONNECTED",
+      satelliteCount: this._forcedSatellites ?? 8 + Math.floor(Math.random() * 8),
       flightMode: this._flightMode,
       connectionState: this._connectionState,
       homeLatitude: this.config.startLatitude,
@@ -293,7 +413,7 @@ export class SimulatorDroneAdapter implements DroneAdapter {
       homeAltitude: this.config.startAltitude,
       flightDurationSeconds: this._flightDuration,
       distanceFromHomeMeters: this._distanceFromHome,
-      timestamp: Date.now(),
+      timestamp: this._frozenTimestamp ?? Date.now(),
     };
   }
 

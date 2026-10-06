@@ -654,7 +654,140 @@ describe("FrameBuffer", () => {
   });
 });
 
-// ── Simulator ──────────────────────────────────────────────────────────
+describe("simulator fault injection", () => {
+  // The safety engine can only be trusted if every failure it claims to detect
+  // can actually be provoked. These knobs are what make that possible.
+  let sim: SimulatorDroneAdapter;
+
+  beforeEach(() => {
+    sim = new SimulatorDroneAdapter("sim-fault", {
+      startLatitude: 37.7749,
+      startLongitude: -122.4194,
+      startAltitude: 50,
+      speedMps: 5,
+      batteryCapacityPercent: 100,
+      drainRatePerSecond: 0, // hold battery steady unless a test changes it
+      gpsNoiseMeters: 0,
+      connectionLossChance: 0,
+      windSpeedMps: 0,
+      windDirectionDegrees: 0,
+    });
+  });
+
+  afterEach(async () => {
+    if (sim.isConnected()) await sim.disconnect();
+  });
+
+  test("RTH terminates on arrival at home", async () => {
+    await sim.connect();
+    await new Promise((r) => setTimeout(r, 200));
+    const away = sim.getTelemetry()!.distanceFromHomeMeters;
+    expect(away).toBeGreaterThan(0);
+
+    await sim.requestRTH();
+    // Give it time to fly home and settle.
+    await new Promise((r) => setTimeout(r, 4000));
+
+    const t = sim.getTelemetry()!;
+    // Previously RTH never detected arrival: the aircraft flew over home
+    // still climbing, forever. Termination is what makes the failsafe
+    // verifiable.
+    expect(t.distanceFromHomeMeters).toBeLessThan(20);
+    expect(t.groundSpeed).toBe(0);
+  });
+
+  test("landing terminates at ground level rather than descending forever", async () => {
+    // Start low so the descent completes inside a test. The behaviour under
+    // test is termination at ground level, not the descent rate.
+    const low = new SimulatorDroneAdapter("sim-land", {
+      startLatitude: 37.7749,
+      startLongitude: -122.4194,
+      startAltitude: 3,
+      groundElevation: 0,
+      speedMps: 2,
+      batteryCapacityPercent: 100,
+      drainRatePerSecond: 0,
+      gpsNoiseMeters: 0,
+      connectionLossChance: 0,
+      windSpeedMps: 0,
+      windDirectionDegrees: 0,
+    });
+    try {
+      await low.connect();
+      await new Promise((r) => setTimeout(r, 150));
+      expect(low.getTelemetry()!.altitude).toBeGreaterThan(0);
+
+      await low.requestLand();
+      // Descent is ~1.5 m/s, so a 3 m drop takes ~2 s.
+      const deadline = Date.now() + 20_000;
+      while (!low.hasLanded && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      expect(low.hasLanded).toBe(true);
+      const t = low.getTelemetry()!;
+      expect(t.altitude).toBeGreaterThanOrEqual(-0.01);
+      expect(t.verticalSpeed).toBe(0);
+      expect(t.groundSpeed).toBe(0);
+    } finally {
+      if (low.isConnected()) await low.disconnect();
+    }
+  });
+
+  test("a ground-speed wind can be provoked for the wind monitor", async () => {
+    await sim.connect();
+    await new Promise((r) => setTimeout(r, 150));
+    sim.setSpeed(30); // comfortably above the 15 m/s wind threshold
+    // Ground speed approaches the commanded value with a first-order lag, so
+    // allow it time to settle.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(sim.getTelemetry()!.groundSpeed).toBeGreaterThan(15);
+  });
+
+  test("battery can be driven to the warning and critical thresholds", async () => {
+    await sim.connect();
+    await new Promise((r) => setTimeout(r, 150));
+    sim.setBattery(15);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sim.getTelemetry()!.batteryPercentage).toBeLessThanOrEqual(15);
+
+    sim.setBattery(3);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sim.getTelemetry()!.batteryPercentage).toBeLessThanOrEqual(5);
+  });
+
+  test("GPS degradation can be provoked", async () => {
+    await sim.connect();
+    await new Promise((r) => setTimeout(r, 150));
+    sim.setGpsQuality(false, 2);
+    await new Promise((r) => setTimeout(r, 200));
+    const t = sim.getTelemetry()!;
+    expect(t.gpsFix).toBe(false);
+    expect(t.satelliteCount).toBe(2);
+  });
+
+  test("a link dropout can be provoked deterministically", async () => {
+    await sim.connect();
+    await new Promise((r) => setTimeout(r, 150));
+    sim.dropLink();
+    expect(sim.connectionState).toBe("LOST");
+    sim.restoreLink();
+    expect(sim.connectionState).toBe("CONNECTED");
+  });
+
+  test("a frozen telemetry clock can be provoked for the timeout monitor", async () => {
+    // The timeout monitor keys off frame age, so the fault must be staleness,
+    // not absence of frames.
+    await sim.connect();
+    await new Promise((r) => setTimeout(r, 150));
+    sim.freezeTelemetryTimestamp();
+    await new Promise((r) => setTimeout(r, 1200));
+    const t = sim.getTelemetry()!;
+    // Frames are still arriving; they are simply old. This is what a stalled
+    // upstream would look like, and what the monitor must catch.
+    expect(Date.now() - t.timestamp).toBeGreaterThan(1000);
+  });
+});
 
 describe("SimulatorDroneAdapter", () => {
   let sim: SimulatorDroneAdapter;

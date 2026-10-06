@@ -51,7 +51,28 @@ full component-by-component status table.
   so a strong wind while hovering reads as zero.
 - **Duplicated thresholds.** `telemetry_service.ts` and `safety_service.ts` each define
   their own battery and satellite limits; they can drift.
-- **RTH never terminates** in the simulator, and landing has no ground contact.
+- **Safety has no process isolation.** It is a synchronous call in the same event
+  loop as everything else; a blocking call anywhere stalls the failsafe.
+- **Audit log is in-memory.** A restart erases who-did-what.
+
+The full single-point-of-failure register, and the assumptions that are believed
+but not yet proven, are in
+[docs/architecture.md sections 15-16](docs/architecture.md).
+
+### Health reporting
+
+`/healthz` returns a **derived** verdict across ten subsystems, never a hardcoded
+`ok`:
+
+```
+NOMINAL > UNKNOWN > DEGRADED > CRITICAL > OFFLINE   (worst wins)
+```
+
+A subsystem that has not been measured reports `UNKNOWN`, and `UNKNOWN`
+propagates to the aggregate. With no camera source and no vision model wired --
+the shipped configuration -- the console reports `UNKNOWN`, because that is the
+honest answer. Treating it as nominal would be false reassurance during a
+search.
 
 ---
 
@@ -202,7 +223,7 @@ npm run build
 npm test
 ```
 
-123 tests across three suites:
+150 tests across four suites:
 
 - **unit** — roles and capabilities, auth, overrides and expiry, audit,
   safety transitions, mission state machine, persistence and crash recovery,
@@ -213,6 +234,8 @@ npm test
   handshake rejection, persistence across restart.
 - **entrypoint** — the startup bootstrap wiring, which is where the tokens and
   the server's `AuthService` must be the same object.
+- **health** — system-health aggregation, in particular that an unmeasured
+  subsystem reports `UNKNOWN` and never folds into a healthy verdict.
 
 Documentation diagrams are checked too:
 

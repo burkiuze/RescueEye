@@ -30,14 +30,46 @@ export class JsonlStore<T extends { id: string }> {
   ) {
     this.filePath = filePath ?? null;
     if (this.filePath) {
-      mkdirSync(dirname(this.filePath), { recursive: true });
+      // An unwritable DATA_DIR used to throw straight out of the constructor,
+      // which meant out of `new RescueEyeServer(...)`, which meant the process
+      // died before it ever bound a port — with no indication of why. Degrade to
+      // in-memory instead and let the health endpoint report the fault.
+      try {
+        mkdirSync(dirname(this.filePath), { recursive: true });
+      } catch (err) {
+        this.degradedReason = `mkdir failed: ${err instanceof Error ? err.message : String(err)}`;
+        return;
+      }
       this.load();
-      this.stream = createWriteStream(this.filePath, { flags: "a" });
+      try {
+        this.stream = createWriteStream(this.filePath, { flags: "a" });
+      } catch (err) {
+        this.degradedReason = `open failed: ${err instanceof Error ? err.message : String(err)}`;
+        this.stream = null;
+        return;
+      }
+      // An unhandled 'error' on a WriteStream is an uncaught exception. Disk
+      // full, permissions revoked, filesystem remounted — any of these would
+      // take the whole command centre down mid-sortie.
+      this.stream.on("error", (err) => {
+        this.degradedReason = `write failed: ${err instanceof Error ? err.message : String(err)}`;
+        this.writeFailures++;
+        this.stream = null;
+      });
     }
   }
 
   /** Records skipped because they could not be parsed. Surfaced in /api/health. */
   public corruptLines = 0;
+  /** Records that could not be written. Surfaced in /api/health. */
+  public writeFailures = 0;
+  /** Non-null when the store has fallen back to in-memory. */
+  public degradedReason: string | null = null;
+
+  /** True when the store can no longer persist. */
+  get degraded(): boolean {
+    return this.filePath !== null && this.stream === null;
+  }
 
   private load(): void {
     if (!this.filePath || !existsSync(this.filePath)) return;
@@ -69,7 +101,16 @@ export class JsonlStore<T extends { id: string }> {
   put(record: T): T {
     this.index.set(record.id, record);
     if (this.stream) {
-      this.stream.write(`${JSON.stringify(record)}\n`);
+      // The event log is the flight record. Losing a line silently is worse
+      // than knowing it failed, so the write error is recorded rather than
+      // swallowed, and the record stays in memory where it can still be read.
+      try {
+        this.stream.write(`${JSON.stringify(record)}\n`);
+      } catch (err) {
+        this.writeFailures++;
+        this.degradedReason = `write threw: ${err instanceof Error ? err.message : String(err)}`;
+        this.stream = null;
+      }
     }
     return record;
   }
@@ -111,13 +152,28 @@ export class JsonlStore<T extends { id: string }> {
 
 /**
  * In-memory store used when no data directory is configured (tests, demos).
- * Exposes the same surface as JsonlStore so services do not branch on it.
+ * Exposes the same surface as JsonlStore so services do not branch on it —
+ * including the health fields, so SystemHealthManager can probe either kind
+ * without a type check.
  */
 export class MemoryStore<T extends { id: string }> {
   private index = new Map<string, T>();
   public corruptLines = 0;
+  /** Always zero: nothing on disk to fail. */
+  public writeFailures = 0;
+  /** Reason this store is not durable. A test store is intentionally so. */
+  public degradedReason: string | null = "in-memory store (no data directory configured)";
 
   constructor(readonly kind: StoreKind) {}
+
+  /**
+   * An in-memory store is not durable by design. Reporting it as degraded keeps
+   * the health aggregate honest in tests and demos instead of implying the
+   * flight record is safe when it is not.
+   */
+  get degraded(): boolean {
+    return true;
+  }
 
   put(record: T): T {
     this.index.set(record.id, record);
