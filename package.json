@@ -9,7 +9,8 @@
     "dev": "node scripts/build.js && node dist/backend/main.js",
     "test": "node node_modules/jest/bin/jest.js --runInBand --no-coverage",
     "test:coverage": "node node_modules/jest/bin/jest.js --runInBand --coverage",
-    "check:mermaid": "node scripts/check-mermaid.js"
+    "check:mermaid": "node scripts/check-mermaid.js",
+    "build:map": "node scripts/build-map.js"
   },
   "dependencies": {
     "ws": "^8.16.0"

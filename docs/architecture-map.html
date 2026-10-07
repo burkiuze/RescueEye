@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RescueEye — System Map</title>
+<style>
+  :root{
+    --bg:#080a0e; --lane:#0f1218; --lane-line:#1b212b;
+    --card:#161b23; --card-line:#242c37;
+    --ink:#e2e8f0; --dim:#7c8798; --faint:#4d5765;
+    --impl:#22d37a; --partial:#f0a417; --planned:#5d6875; --unwired:#b57bff;
+    --danger:#ff4d4d;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       padding:22px 20px 40px}
+
+  header.page{margin-bottom:18px}
+  h1{font-size:22px;font-weight:700;letter-spacing:1.5px}
+  .sub{color:var(--dim);font-size:12.5px;margin-top:5px;max-width:900px}
+
+  .legend{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 22px}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;
+        border:1px solid var(--card-line);border-radius:999px;background:var(--card);
+        font:600 11px/1 ui-monospace,monospace;letter-spacing:.6px;cursor:pointer;
+        color:var(--ink);user-select:none}
+  .chip i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  .chip small{color:var(--dim);font-weight:400;letter-spacing:0}
+  .chip[aria-pressed="false"]{opacity:.34}
+  .chip.impl i{background:var(--impl)} .chip.impl[aria-pressed="true"]{border-color:var(--impl)}
+  .chip.partial i{background:var(--partial)} .chip.partial[aria-pressed="true"]{border-color:var(--partial)}
+  .chip.planned i{background:var(--planned)} .chip.planned[aria-pressed="true"]{border-color:var(--planned)}
+  .chip.unwired i{background:var(--unwired)} .chip.unwired[aria-pressed="true"]{border-color:var(--unwired)}
+
+  .lane{background:var(--lane);border:1px solid var(--lane-line);border-radius:10px;
+        margin-bottom:10px;overflow:hidden}
+  .lane-head{font:700 10.5px/1 ui-monospace,monospace;letter-spacing:1.8px;color:var(--dim);
+            padding:11px 14px;border-bottom:1px solid var(--lane-line);background:#0c0f14;
+            display:flex;align-items:center;gap:9px}
+  .lane-id{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:4px;
+          background:#161c26;border:1px solid #2a3341;color:var(--ink);font-size:10px}
+  .lane-body{display:flex;flex-wrap:wrap;gap:10px;padding:12px}
+
+  .node{position:relative;flex:1 1 190px;min-width:190px;max-width:280px;
+        background:var(--card);border:1px solid var(--card-line);border-radius:7px;
+        overflow:hidden}
+  .node .stripe{position:absolute;left:0;top:0;bottom:0;width:3px}
+  .node .body{padding:9px 11px 9px 14px}
+  .node .t{font-size:12.5px;font-weight:650;line-height:1.25}
+  .node .s{font-size:10.5px;color:var(--dim);margin-top:2px}
+  .node .f{font:9.5px/1.3 ui-monospace,monospace;color:var(--faint);margin-top:5px;
+           word-break:break-word}
+  .node .note{display:inline-block;margin-top:6px;padding:2px 6px;border-radius:3px;
+              background:#1b212b;color:var(--partial);font:9px/1.4 ui-monospace,monospace}
+
+  .node.implemented .stripe{background:var(--impl)}
+  .node.partial     .stripe{background:var(--partial)}
+  .node.planned     .stripe{background:var(--planned)}
+  .node.unwired     .stripe{background:var(--unwired)}
+  .node.implemented{border-left:1px solid rgba(34,211,122,.4)}
+  .node.partial    {border-left:1px solid rgba(240,164,23,.4)}
+  .node.planned    {border-left:1px solid rgba(93,104,117,.4);opacity:.82}
+  .node.unwired    {border-left:1px solid rgba(181,123,255,.4)}
+
+  /* Hub and decision-point nodes read as the joints of the system. */
+  .node.hub{border-color:#4a3030;background:#1a1418}
+  .node.hub .t{color:#ffd9d9}
+  .node.hub::after{content:"";position:absolute;inset:-1px;border-radius:7px;
+                   pointer-events:none;box-shadow:inset 0 0 0 1px rgba(255,77,77,.35)}
+  .node.diamond{border-style:dashed;border-color:#3d4856}
+  .node.diamond .t::before{content:"◆ ";color:var(--dim);font-size:9px}
+
+  /* The safety lane is the reason the whole system exists; give it weight. */
+  #lane-E{border-color:#3a2020}
+  #lane-E .lane-head{color:#ff9c9c;background:#150d0d}
+
+  .flows{margin-top:22px;background:var(--lane);border:1px solid var(--lane-line);
+         border-radius:10px;padding:14px}
+  .flows h2{font:700 10.5px/1 ui-monospace,monospace;letter-spacing:1.8px;color:var(--dim);
+            margin-bottom:11px}
+  .flow{display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:5px;
+        font:11.5px/1.4 ui-monospace,monospace;color:var(--dim);margin-bottom:3px}
+  .flow .arrow{color:var(--faint)}
+  .flow.danger{color:var(--danger);background:rgba(255,77,77,.07)}
+
+  footer{margin-top:22px;color:var(--faint);font:11px/1.6 ui-monospace,monospace}
+  footer code{color:var(--dim)}
+
+  /* Filtering dims a status rather than removing it, so the shape of the
+     system stays legible while you compare states. */
+  body.hide-implemented .node[data-status=implemented]{opacity:.13}
+  body.hide-partial     .node[data-status=partial]{opacity:.13}
+  body.hide-planned     .node[data-status=planned]{opacity:.13}
+  body.hide-unwired     .node[data-status=unwired]{opacity:.13}
+
+  @media (max-width:640px){
+    body{padding:14px 12px 30px}
+    .node{flex-basis:100%;max-width:none}
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>RESCUEEYE — SYSTEM MAP</h1>
+  <p class="sub">
+    Search &amp; rescue UAV platform. Onboard perception, mission intelligence,
+    safety/failsafe, secure ground control, flight record, and a digital twin.
+    Every card names the file that backs it — a card reading <code>—</code> is
+    not implemented.
+  </p>
+</header>
+
+<div class="legend">
+  <button class="chip impl"   data-s="implemented" aria-pressed="true"><i></i>IMPLEMENTED <small>running + tested</small></button>
+  <button class="chip partial" data-s="partial"     aria-pressed="true"><i></i>PARTIAL <small>works, incomplete</small></button>
+  <button class="chip planned" data-s="planned"     aria-pressed="true"><i></i>PLANNED <small>not implemented</small></button>
+  <button class="chip unwired" data-s="unwired"     aria-pressed="true"><i></i>UNWIRED <small>built, not connected</small></button>
+</div>
+
+<section class="lane" id="lane-C">
+    <header class="lane-head"><span class="lane-id">C</span> DIGITAL TWIN / SIMULATOR</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Fault Injection</div>
+      <div class="s">battery · GPS · link · clock</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      <span class="note">makes safety testable</span>
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Physics Models</div>
+      <div class="s">position · heading · altitude</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Battery Model</div>
+      <div class="s">≈20 min pack</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Wind + GPS Noise</div>
+      <div class="s">push · jitter</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">RTH / Landing</div>
+      <div class="s">terminates on arrival</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Simulation Engine</div>
+      <div class="s">tick · 10 Hz</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-D">
+    <header class="lane-head"><span class="lane-id">D</span> DRONE ADAPTER SEAM</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">SimulatorDroneAdapter</div>
+      <div class="s">no hardware needed</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">MavlinkDroneAdapter</div>
+      <div class="s">PX4 · ArduPilot</div>
+      <div class="f">drone/mavlink_adapter.ts</div>
+      <span class="note">no socket</span>
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">MavsdkDroneAdapter</div>
+      <div class="s">MAVSDK</div>
+      <div class="f">drone/mavsdk_adapter.ts</div>
+      <span class="note">no client</span>
+    </div>
+  </div><div class="node implemented diamond" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">DroneAdapter</div>
+      <div class="s">the one seam everything shares</div>
+      <div class="f">shared/models.ts</div>
+      
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-A">
+    <header class="lane-head"><span class="lane-id">A</span> SENSORS / ONBOARD</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">RF / Telemetry</div>
+      <div class="s">connectionState</div>
+      <div class="f">shared/models.ts</div>
+      
+    </div>
+  </div><div class="node partial" data-status="partial">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">GNSS</div>
+      <div class="s">fix · satellites</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">IMU</div>
+      <div class="s">accel · gyro</div>
+      <div class="f">—</div>
+      
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Barometer</div>
+      <div class="s">altitude</div>
+      <div class="f">—</div>
+      
+    </div>
+  </div><div class="node partial" data-status="partial">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Compass</div>
+      <div class="s">heading</div>
+      <div class="f">simulator/simulator_adapter.ts</div>
+      
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-E">
+    <header class="lane-head"><span class="lane-id">E</span> TELEMETRY &amp; SAFETY</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Telemetry Receiver</div>
+      <div class="s">validate · hold state</div>
+      <div class="f">backend/server.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">TelemetryService</div>
+      <div class="s">latest frame · alerts</div>
+      <div class="f">backend/telemetry_service.ts</div>
+      
+    </div>
+  </div><div class="node partial" data-status="partial">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Safety Monitors</div>
+      <div class="s">battery · gps · link · geo · wind</div>
+      <div class="f">backend/safety_service.ts</div>
+      <span class="note">geofence warns only</span>
+    </div>
+  </div><div class="node implemented hub diamond" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">SafetyService.evaluate</div>
+      <div class="s">every single frame</div>
+      <div class="f">backend/safety_service.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Transition Detector</div>
+      <div class="s">state change + 30 s</div>
+      <div class="f">backend/safety_service.ts</div>
+      
+    </div>
+  </div><div class="node implemented diamond" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Failsafe + Arbitration</div>
+      <div class="s">override ledger</div>
+      <div class="f">backend/server.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Drone Command Dispatch</div>
+      <div class="s">RTH · land · abort</div>
+      <div class="f">backend/server.ts</div>
+      
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-F">
+    <header class="lane-head"><span class="lane-id">F</span> AUTHORIZATION &amp; COMMAND</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Ground Console</div>
+      <div class="s">no build step</div>
+      <div class="f">frontend/app.js</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Authentication</div>
+      <div class="s">bearer · constant-time</div>
+      <div class="f">backend/auth_service.ts</div>
+      
+    </div>
+  </div><div class="node implemented diamond" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Capability Authorization</div>
+      <div class="s">role → capability</div>
+      <div class="f">backend/auth_service.ts</div>
+      <span class="note">admin cannot fly</span>
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Input Validation</div>
+      <div class="s">256 KB cap · schema</div>
+      <div class="f">backend/server.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Drone Command Gateway</div>
+      <div class="s">REST only</div>
+      <div class="f">backend/server.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">AuditLog</div>
+      <div class="s">allowed + denied</div>
+      <div class="f">backend/auth_service.ts</div>
+      <span class="note">in-memory only</span>
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-G">
+    <header class="lane-head"><span class="lane-id">G</span> MISSION INTELLIGENCE</header>
+    <div class="lane-body"><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Search Area</div>
+      <div class="s">polygon</div>
+      <div class="f">—</div>
+      
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Coverage + Waypoint Planner</div>
+      <div class="s">lawnmower pattern</div>
+      <div class="f">—</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Mission State Machine</div>
+      <div class="s">PLANNED→ACTIVE→…→FAILED</div>
+      <div class="f">backend/server.ts</div>
+      <span class="note">illegal → 409</span>
+    </div>
+  </div><div class="node partial" data-status="partial">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Mission Progress</div>
+      <div class="s">estimates · abort</div>
+      <div class="f">backend/server.ts</div>
+      <span class="note">progress only, no coverage</span>
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-B">
+    <header class="lane-head"><span class="lane-id">B</span> VISION &amp; AI PERCEPTION</header>
+    <div class="lane-body"><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Camera Source</div>
+      <div class="s">RTSP · local · file</div>
+      <div class="f">vision/camera_pipeline.ts (stub)</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Frame Buffer</div>
+      <div class="s">bounded · drop-oldest</div>
+      <div class="f">vision/camera_pipeline.ts</div>
+      <span class="note">tested, not wired</span>
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Preprocessing</div>
+      <div class="s">resize · normalise</div>
+      <div class="f">—</div>
+      
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Inference Runtime</div>
+      <div class="s">ONNX · pluggable</div>
+      <div class="f">vision/detection.ts (interface only)</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Detection Model</div>
+      <div class="s">DetectionModel</div>
+      <div class="f">vision/detection.ts</div>
+      <span class="note">NMS + decode tested</span>
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Confidence Filter + NMS</div>
+      <div class="s">IoU 0.45</div>
+      <div class="f">vision/detection.ts</div>
+      
+    </div>
+  </div><div class="node implemented hub" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Provenance Gate</div>
+      <div class="s">MODEL · OPERATOR · SYNTHETIC</div>
+      <div class="f">backend/server.ts</div>
+      <span class="note">synthetic never looks real</span>
+    </div>
+  </div><div class="node planned" data-status="planned">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Geolocation</div>
+      <div class="s">pixel → coordinate</div>
+      <div class="f">—</div>
+      
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-H">
+    <header class="lane-head"><span class="lane-id">H</span> GROUND CONTROL CENTRE</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Sign-in Gate</div>
+      <div class="s">role-gated controls</div>
+      <div class="f">frontend/index.html</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Telemetry Panel</div>
+      <div class="s">ALT · BAT · GPS · LINK</div>
+      <div class="f">frontend/app.js</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Live Map</div>
+      <div class="s">track · detections</div>
+      <div class="f">frontend/app.js</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Detection Review</div>
+      <div class="s">SIMULATED tag</div>
+      <div class="f">frontend/app.js</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Event Timeline</div>
+      <div class="s">300-entry bound</div>
+      <div class="f">frontend/app.js</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">WebSocket</div>
+      <div class="s">read-only push</div>
+      <div class="f">backend/server.ts</div>
+      <span class="note">commands refused</span>
+    </div>
+  </div></div>
+  </section>
+<section class="lane" id="lane-I">
+    <header class="lane-head"><span class="lane-id">I</span> EVENTS &amp; PERSISTENCE</header>
+    <div class="lane-body"><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Event / Mission / Detection Store</div>
+      <div class="s">JSONL append-only</div>
+      <div class="f">backend/persistence.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">Crash-tolerant Load</div>
+      <div class="s">skip bad line, count it</div>
+      <div class="f">backend/persistence.ts</div>
+      
+    </div>
+  </div><div class="node implemented hub diamond" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">SystemHealthManager</div>
+      <div class="s">worst-of · UNKNOWN ≠ NOMINAL</div>
+      <div class="f">backend/health_manager.ts</div>
+      
+    </div>
+  </div><div class="node implemented" data-status="implemented">
+    <span class="stripe"></span>
+    <div class="body">
+      <div class="t">/healthz</div>
+      <div class="s">derived verdict</div>
+      <div class="f">backend/server.ts</div>
+      
+    </div>
+  </div></div>
+  </section>
+
+<div class="flows">
+  <h2>PRINCIPAL FLOWS</h2>
+  <div class="flow"><span class="arrow">→</span> SENSORS / ONBOARD telemetry frames ~10 Hz TELEMETRY &amp; SAFETY</div>
+<div class="flow"><span class="arrow">→</span> DRONE ADAPTER SEAM adapter callback TELEMETRY &amp; SAFETY</div>
+<div class="flow danger"><span class="arrow">→</span> TELEMETRY &amp; SAFETY RTH · land · abort DRONE ADAPTER SEAM</div>
+<div class="flow danger"><span class="arrow">→</span> AUTHORIZATION &amp; COMMAND authorised commands DRONE ADAPTER SEAM</div>
+<div class="flow"><span class="arrow">→</span> DIGITAL TWIN / SIMULATOR substitutes for the aircraft DRONE ADAPTER SEAM</div>
+<div class="flow danger"><span class="arrow">→</span> TELEMETRY &amp; SAFETY failsafe decisions EVENTS &amp; PERSISTENCE</div>
+<div class="flow danger"><span class="arrow">→</span> MISSION INTELLIGENCE abort on link loss DRONE ADAPTER SEAM</div>
+<div class="flow"><span class="arrow">→</span> VISION &amp; AI PERCEPTION candidate findings GROUND CONTROL CENTRE</div>
+<div class="flow"><span class="arrow">→</span> TELEMETRY &amp; SAFETY WebSocket push, read-only GROUND CONTROL CENTRE</div>
+<div class="flow"><span class="arrow">→</span> GROUND CONTROL CENTRE REST commands AUTHORIZATION &amp; COMMAND</div>
+<div class="flow"><span class="arrow">→</span> every zone append-only flight record EVENTS &amp; PERSISTENCE</div>
+</div>
+
+<footer>
+  implemented: 36  ·  partial: 4  ·  planned: 10  ·  50 components
+  <br>
+  Generated by <code>scripts/build-map.js</code> — regenerate with <code>npm run build:map</code>
+  · narrative detail in <code>docs/architecture.md</code>
+</footer>
+
+<script>
+  // Toggle a status to dim those cards.
+  for (const chip of document.querySelectorAll('.chip')) {
+    chip.addEventListener('click', () => {
+      const s = chip.dataset.s;
+      const on = document.body.classList.toggle('hide-' + s);
+      chip.setAttribute('aria-pressed', String(!on));
+    });
+  }
+</script>
+</body>
+</html>

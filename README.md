@@ -264,6 +264,16 @@ with a data feed:
 | **Audit / flight record** | Mission events, safety events, security audit, append-only persistence |
 | **Digital twin** | Simulator satisfying the same `DroneAdapter` contract as a real aircraft |
 
+### System map
+
+A single-page visual map of the whole platform — zones, components, status, and
+the file that backs each one:
+
+**[docs/architecture-map.html](docs/architecture-map.html)**
+
+Regenerate with `npm run build:map`. The generator verifies every file path it
+cites, so the map cannot drift into pointing at files that no longer exist.
+
 ### Master diagram
 
 The full system architecture — 194 components across 14 subgraphs — is in
